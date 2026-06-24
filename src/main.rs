@@ -53,6 +53,21 @@ struct Network {
     in_use:  bool,
 }
 
+struct InfoState {
+    ssid:        String,
+    has_profile: bool,
+    password:    String,
+    show_pw:     bool,
+    autoconnect: Option<bool>,
+    bssid:       String,
+    channel:     String,
+    band:        String,
+    security:    String,
+    ip4_address: String,
+    ip4_gateway: String,
+    ip4_dns:     String,
+}
+
 #[derive(Default)]
 struct WifiApp {
     networks: Arc<Mutex<Vec<Network>>>,
@@ -67,10 +82,7 @@ struct WifiApp {
     show_password: bool,
 
     // Info view (view/edit saved connection details)
-    info_ssid:         Option<String>,
-    info_has_profile:  bool,
-    info_password:     String,
-    info_show_pw:      bool,
+    info: Option<InfoState>,
 }
 
 // ── nmcli helpers ─────────────────────────────────────────────────────────────
@@ -114,25 +126,130 @@ fn scan(networks: Arc<Mutex<Vec<Network>>>, scanning: Arc<Mutex<bool>>, status: 
     });
 }
 
-// Returns (has_profile, saved_psk).  Runs synchronously (< 50 ms).
-fn fetch_connection_info(ssid: &str) -> (bool, String) {
-    let has = Command::new("nmcli")
-        .args(["connection", "show", "id", ssid])
-        .output().map(|o| o.status.success()).unwrap_or(false);
-    if !has { return (false, String::new()); }
+// Split a nmcli -t output line on unescaped ':' into at most max_parts fields.
+fn split_nmcli(line: &str, max_parts: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur   = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&':') {
+            chars.next();
+            cur.push(':');
+        } else if c == ':' && parts.len() + 1 < max_parts {
+            parts.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    parts.push(cur);
+    parts
+}
 
-    let pw = Command::new("nmcli")
-        .args(["--show-secrets", "-t", "-f", "802-11-wireless-security.psk",
+// Collect all info-panel data synchronously (~150 ms max).
+fn fetch_info(ssid: &str, in_use: bool) -> InfoState {
+    let mut s = InfoState {
+        ssid:        ssid.to_string(),
+        has_profile: false,
+        password:    String::new(),
+        show_pw:     false,
+        autoconnect: None,
+        bssid:       String::new(),
+        channel:     String::new(),
+        band:        String::new(),
+        security:    String::new(),
+        ip4_address: String::new(),
+        ip4_gateway: String::new(),
+        ip4_dns:     String::new(),
+    };
+
+    // 1. Saved profile: autoconnect + PSK
+    if let Ok(o) = Command::new("nmcli")
+        .args(["--show-secrets", "-t", "-f",
+               "connection.autoconnect,802-11-wireless-security.psk",
                "connection", "show", "id", ssid])
-        .output().ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let v = t.splitn(2, ':').nth(1).unwrap_or("").to_string();
-            if v.is_empty() || v == "--" { None } else { Some(v) }
-        }).unwrap_or_default();
+        .output()
+    {
+        if o.status.success() {
+            s.has_profile = true;
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let p = split_nmcli(line, 2);
+                if p.len() < 2 { continue; }
+                match p[0].as_str() {
+                    "connection.autoconnect" => {
+                        s.autoconnect = match p[1].as_str() {
+                            "no" => Some(false),
+                            _    => Some(true),   // "yes" or "-1" (default = yes)
+                        };
+                    }
+                    "802-11-wireless-security.psk" => {
+                        let v = p[1].trim().to_string();
+                        if !v.is_empty() && v != "--" { s.password = v; }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
-    (true, pw)
+    // 2. Scan cache: BSSID, channel, band, security
+    if let Ok(o) = Command::new("nmcli")
+        .args(["-t", "-f", "SSID,BSSID,CHAN,FREQ,SECURITY",
+               "device", "wifi", "list"])
+        .output()
+    {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let p = split_nmcli(line, 5);
+                if p.len() < 5 || p[0].trim() != ssid { continue; }
+                let bssid = p[1].trim().to_string();
+                let chan  = p[2].trim().to_string();
+                let freq  = p[3].trim();
+                let sec   = p[4].trim();
+                if bssid != "--" && !bssid.is_empty() { s.bssid = bssid; }
+                if chan   != "--" && !chan.is_empty()  { s.channel = chan; }
+                let mhz: u32 = freq.split_whitespace().next()
+                    .and_then(|x| x.parse().ok()).unwrap_or(0);
+                s.band = if mhz >= 5925 { "6 GHz".into() }
+                         else if mhz >= 4900 { "5 GHz".into() }
+                         else if mhz > 0    { "2.4 GHz".into() }
+                         else { String::new() };
+                if !sec.is_empty() && sec != "--" {
+                    s.security = sec.split_whitespace().collect::<Vec<_>>().join("/");
+                }
+                break;
+            }
+        }
+    }
+
+    // 3. Active IP info (only when connected)
+    if in_use {
+        if let Ok(o) = Command::new("nmcli")
+            .args(["-t", "-f", "IP4.ADDRESS,IP4.GATEWAY,IP4.DNS",
+                   "connection", "show", "--active", "id", ssid])
+            .output()
+        {
+            if o.status.success() {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    // Format: FIELD[n]:value  — split on first unescaped ':'
+                    let p = split_nmcli(line, 2);
+                    if p.len() < 2 { continue; }
+                    let field = p[0].as_str();
+                    let val   = p[1].trim().to_string();
+                    if val.is_empty() || val == "--" { continue; }
+                    // Field names may carry an index suffix: IP4.ADDRESS[1]
+                    if field.starts_with("IP4.ADDRESS") && s.ip4_address.is_empty() {
+                        s.ip4_address = val;
+                    } else if field.starts_with("IP4.GATEWAY") {
+                        s.ip4_gateway = val;
+                    } else if field.starts_with("IP4.DNS") && s.ip4_dns.is_empty() {
+                        s.ip4_dns = val;
+                    }
+                }
+            }
+        }
+    }
+
+    s
 }
 
 fn run_nmcli_bg(args: Vec<&'static str>, owned: Vec<String>, status: Arc<Mutex<String>>, ok_msg: String) {
@@ -423,8 +540,8 @@ impl eframe::App for WifiApp {
         }
 
         // ── Route to the active view ──────────────────────────────────────────
-        if let Some(ssid) = self.info_ssid.clone() {
-            self.show_info_view(ctx, &ssid, &networks);
+        if self.info.is_some() {
+            self.show_info_view(ctx, &networks);
         } else if let Some(ssid) = self.connecting_to.clone() {
             self.show_password_view(ctx, &ssid, &status);
         } else {
@@ -542,11 +659,7 @@ impl WifiApp {
             }
         } else if do_info {
             if let Some(net) = &selected_net {
-                let (has_profile, pw) = fetch_connection_info(&net.ssid);
-                self.info_ssid        = Some(net.ssid.clone());
-                self.info_has_profile = has_profile;
-                self.info_password    = pw;
-                self.info_show_pw     = false;
+                self.info = Some(fetch_info(&net.ssid, net.in_use));
             }
         }
 
@@ -706,14 +819,21 @@ impl WifiApp {
         }
     }
 
-    fn show_info_view(&mut self, ctx: &egui::Context, ssid: &str, networks: &[Network]) {
-        let net       = networks.iter().find(|n| n.ssid == ssid);
-        let is_secured = net.map(|n| n.secured).unwrap_or(true);
-        let in_use     = net.map(|n| n.in_use).unwrap_or(false);
+    fn show_info_view(&mut self, ctx: &egui::Context, networks: &[Network]) {
+        // Clone the fields we need for the button bar (avoids holding a borrow into self
+        // while the panel closures run).
+        let (ssid, has_profile, is_secured, in_use) = {
+            let i   = self.info.as_ref().unwrap();
+            let net = networks.iter().find(|n| n.ssid == i.ssid);
+            (i.ssid.clone(),
+             i.has_profile,
+             net.map(|n| n.secured).unwrap_or(true),
+             net.map(|n| n.in_use).unwrap_or(false))
+        };
 
-        let mut go_back    = false;
-        let mut do_forget  = false;
-        let mut do_save    = false;
+        let mut go_back   = false;
+        let mut do_forget = false;
+        let mut do_save   = false;
 
         egui::TopBottomPanel::bottom("info_bar")
             .frame(egui::Frame::new()
@@ -723,13 +843,13 @@ impl WifiApp {
                 ui.horizontal(|ui| {
                     if neutral_btn(ui, "Back", 60.0).clicked() { go_back = true; }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.info_has_profile && is_secured {
+                        if has_profile && is_secured {
                             if colored_btn(ui, "Save Password", BTN_SAVE, Color32::WHITE, 108.0, false).clicked() {
                                 do_save = true;
                             }
                             ui.add_space(4.0);
                         }
-                        if self.info_has_profile {
+                        if has_profile {
                             if colored_btn(ui, "Forget", BTN_FORGET, Color32::WHITE, 68.0, false).clicked() {
                                 do_forget = true;
                             }
@@ -741,11 +861,12 @@ impl WifiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new()
                 .fill(WIN_BG)
-                .inner_margin(egui::Margin { left: 20, right: 20, top: 22, bottom: 8 }))
+                .inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 8 }))
             .show(ctx, |ui| {
-                // SSID + status
-                ui.label(egui::RichText::new(ssid).size(16.0).strong().color(TEXT));
-                ui.add_space(4.0);
+                let info = self.info.as_mut().unwrap();
+
+                ui.label(egui::RichText::new(&info.ssid).size(16.0).strong().color(TEXT));
+                ui.add_space(3.0);
                 if in_use {
                     ui.horizontal(|ui| {
                         let (dot, _) = ui.allocate_exact_size(
@@ -758,50 +879,109 @@ impl WifiApp {
                     ui.label(egui::RichText::new("Not connected").size(12.0).color(SUBTEXT));
                 }
 
-                ui.add_space(18.0);
+                ui.add_space(10.0);
 
-                if !self.info_has_profile {
+                egui::Grid::new("info_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 5.0])
+                    .min_col_width(76.0)
+                    .show(ui, |ui| {
+                        let lbl = |text: &str| {
+                            egui::RichText::new(text).size(12.0).color(SUBTEXT)
+                        };
+                        let val = |text: &str| {
+                            egui::RichText::new(text).size(12.0).color(TEXT)
+                        };
+
+                        // ── Network / radio info ──────────────────────────
+                        if !info.security.is_empty() {
+                            ui.label(lbl("Security"));
+                            ui.label(val(&info.security));
+                            ui.end_row();
+                        }
+                        let freq_line = match (info.band.as_str(), info.channel.as_str()) {
+                            (b, c) if !b.is_empty() && !c.is_empty() => format!("{b} · Ch. {c}"),
+                            (b, _) if !b.is_empty() => b.to_string(),
+                            (_, c) if !c.is_empty() => format!("Ch. {c}"),
+                            _ => String::new(),
+                        };
+                        if !freq_line.is_empty() {
+                            ui.label(lbl("Frequency"));
+                            ui.label(val(&freq_line));
+                            ui.end_row();
+                        }
+                        if !info.bssid.is_empty() && info.bssid != "--" {
+                            ui.label(lbl("BSSID"));
+                            ui.label(val(&info.bssid));
+                            ui.end_row();
+                        }
+
+                        // ── IP info (only when connected) ─────────────────
+                        if !info.ip4_address.is_empty() {
+                            ui.label(lbl("IP Address"));
+                            ui.label(val(&info.ip4_address));
+                            ui.end_row();
+                        }
+                        if !info.ip4_gateway.is_empty() {
+                            ui.label(lbl("Gateway"));
+                            ui.label(val(&info.ip4_gateway));
+                            ui.end_row();
+                        }
+                        if !info.ip4_dns.is_empty() {
+                            ui.label(lbl("DNS"));
+                            ui.label(val(&info.ip4_dns));
+                            ui.end_row();
+                        }
+
+                        // ── Profile info ──────────────────────────────────
+                        if info.has_profile && is_secured {
+                            ui.label(lbl("Password"));
+                            ui.add(egui::TextEdit::singleline(&mut info.password)
+                                .password(!info.show_pw)
+                                .desired_width(f32::INFINITY)
+                                .font(FontId::proportional(12.0))
+                                .hint_text("(none saved)"));
+                            ui.end_row();
+
+                            ui.label("");
+                            ui.checkbox(&mut info.show_pw,
+                                egui::RichText::new("Show password").size(12.0).color(SUBTEXT));
+                            ui.end_row();
+                        }
+
+                        if let Some(ac) = info.autoconnect {
+                            ui.label(lbl("Auto-connect"));
+                            ui.label(val(if ac { "Yes" } else { "No" }));
+                            ui.end_row();
+                        }
+                    });
+
+                if !info.has_profile {
+                    ui.add_space(6.0);
                     ui.label(egui::RichText::new("No saved profile for this network.")
-                        .size(13.0).color(SUBTEXT));
-                } else if is_secured {
-                    ui.label(egui::RichText::new("Saved password:").size(12.0).color(SUBTEXT));
-                    ui.add_space(6.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.info_password)
-                        .password(!self.info_show_pw)
-                        .desired_width(f32::INFINITY)
-                        .font(FontId::proportional(13.0))
-                        .hint_text("(none saved)"));
-                    ui.add_space(6.0);
-                    ui.checkbox(&mut self.info_show_pw,
-                        egui::RichText::new("Show password").size(12.0).color(SUBTEXT));
-                } else {
-                    ui.label(egui::RichText::new("Open network — no password.")
-                        .size(13.0).color(SUBTEXT));
+                        .size(12.0).color(SUBTEXT));
                 }
             });
 
-        // Handle actions
         if go_back {
-            self.info_ssid = None;
+            self.info = None;
         } else if do_forget {
-            let s  = ssid.to_string();
             let st = Arc::clone(&self.status);
-            let ok = format!("Forgot {s}");
-            run_nmcli_bg(vec!["connection", "delete", "id"], vec![s.clone()], st, ok);
-            if self.selected_ssid.as_deref() == Some(ssid) { self.selected_ssid = None; }
-            self.info_ssid = None;
+            let ok = format!("Forgot {ssid}");
+            run_nmcli_bg(vec!["connection", "delete", "id"], vec![ssid.clone()], st, ok);
+            if self.selected_ssid.as_deref() == Some(&ssid) { self.selected_ssid = None; }
+            self.info = None;
             scan(Arc::clone(&self.networks), Arc::clone(&self.scanning), Arc::clone(&self.status));
         } else if do_save {
-            let s  = ssid.to_string();
-            let pw = self.info_password.clone();
+            let pw = self.info.as_ref().unwrap().password.clone();
             let st = Arc::clone(&self.status);
-            let ok = format!("Password updated for {s}");
+            let ok = format!("Password updated for {ssid}");
             run_nmcli_bg(
                 vec!["connection", "modify", "id"],
-                vec![s, String::from("wifi-sec.psk"), pw],
+                vec![ssid.clone(), String::from("wifi-sec.psk"), pw],
                 st, ok,
             );
-            self.info_ssid = None;
+            self.info = None;
         }
     }
 }
