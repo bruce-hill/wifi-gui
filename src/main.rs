@@ -290,22 +290,23 @@ fn colored_btn(
     fill: Color32,
     text_col: Color32,
     min_w: f32,
+    disabled: bool,
 ) -> egui::Response {
     let border = Color32::from_rgb(
         fill.r().saturating_sub(30),
         fill.g().saturating_sub(30),
         fill.b().saturating_sub(30),
     );
-    let resp = ui.add(
-        egui::Button::new(egui::RichText::new(label).size(13.0).color(text_col))
-            .fill(fill)
-            .stroke(Stroke::new(1.0, border))
-            .min_size(egui::vec2(min_w, 26.0)),
-    );
+    let mut btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(text_col))
+        .fill(fill)
+        .stroke(Stroke::new(1.0, border))
+        .min_size(egui::vec2(min_w, 26.0));
+    if disabled { btn = btn.sense(egui::Sense::empty()); }
+    let resp = ui.add(btn);
     gradient_v(ui.painter(), resp.rect,
         Color32::from_rgba_unmultiplied(255, 255, 255, 25),
         Color32::from_rgba_unmultiplied(0, 0, 0, 18));
-    resp
+    if disabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::PointingHand) }
 }
 
 fn neutral_btn(ui: &mut egui::Ui, label: &str, min_w: f32) -> egui::Response {
@@ -318,7 +319,7 @@ fn neutral_btn(ui: &mut egui::Ui, label: &str, min_w: f32) -> egui::Response {
     gradient_v(ui.painter(), resp.rect,
         Color32::from_rgba_unmultiplied(255, 255, 255, 25),
         Color32::from_rgba_unmultiplied(0, 0, 0, 18));
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -406,7 +407,8 @@ impl eframe::App for WifiApp {
                 );
 
                 // Close button
-                let close = ui.interact(close_rect, Id::new("close_btn"), egui::Sense::click());
+                let close = ui.interact(close_rect, Id::new("close_btn"), egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
                 let close_fill = if close.hovered() { CLOSE_H } else { CLOSE_N };
                 let close_vis = close_rect.shrink2(egui::vec2(3.0, 3.0));
                 gradient_v_rounded(ui.painter(), close_vis,
@@ -500,7 +502,7 @@ impl WifiApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Primary action button
                         if is_in_use {
-                            if colored_btn(ui, "Disconnect", BTN_DISC, Color32::WHITE, 95.0).clicked() {
+                            if colored_btn(ui, "Disconnect", BTN_DISC, Color32::WHITE, 95.0, false).clicked() {
                                 do_disconnect = true;
                             }
                         } else {
@@ -509,14 +511,14 @@ impl WifiApp {
                             } else {
                                 (BTN_DIS_BG, BTN_DIS_FG)
                             };
-                            if colored_btn(ui, "Connect", fill, tc, 85.0).clicked() && can_act {
+                            if colored_btn(ui, "Connect", fill, tc, 85.0, !can_act).clicked() {
                                 do_connect = true;
                             }
                         }
                         // Info button (only when a network is selected)
                         if can_act {
                             ui.add_space(4.0);
-                            if colored_btn(ui, "Info", BTN_INFO, Color32::WHITE, 52.0).clicked() {
+                            if colored_btn(ui, "Info", BTN_INFO, Color32::WHITE, 52.0, false).clicked() {
                                 do_info = true;
                             }
                         }
@@ -565,6 +567,7 @@ impl WifiApp {
                         let selected = self.selected_ssid.as_deref() == Some(&net.ssid);
                         let (rect, resp) = ui.allocate_exact_size(
                             egui::vec2(avail_w, ROW_H), egui::Sense::click());
+                        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
 
                         if ui.is_rect_visible(rect) {
                             let p = ui.painter();
@@ -658,7 +661,7 @@ impl WifiApp {
                     if neutral_btn(ui, "Cancel", 75.0).clicked() { do_cancel = true; }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if colored_btn(ui, "Connect", BTN_CONN, Color32::WHITE, 85.0).clicked() || enter {
+                        if colored_btn(ui, "Connect", BTN_CONN, Color32::WHITE, 85.0, false).clicked() || enter {
                             do_connect = true;
                         }
                     });
@@ -721,13 +724,13 @@ impl WifiApp {
                     if neutral_btn(ui, "Back", 60.0).clicked() { go_back = true; }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.info_has_profile && is_secured {
-                            if colored_btn(ui, "Save Password", BTN_SAVE, Color32::WHITE, 108.0).clicked() {
+                            if colored_btn(ui, "Save Password", BTN_SAVE, Color32::WHITE, 108.0, false).clicked() {
                                 do_save = true;
                             }
                             ui.add_space(4.0);
                         }
                         if self.info_has_profile {
-                            if colored_btn(ui, "Forget", BTN_FORGET, Color32::WHITE, 68.0).clicked() {
+                            if colored_btn(ui, "Forget", BTN_FORGET, Color32::WHITE, 68.0, false).clicked() {
                                 do_forget = true;
                             }
                         }
