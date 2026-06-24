@@ -1,0 +1,5 @@
+- [ ] Show password button to reveal saved passwords
+- [ ] Manual refresh/re-scan of networks
+- [ ] Ability to forget networks
+- [ ] Ability to disconnect from a network
+- [ ] Toggle wifi on/off
