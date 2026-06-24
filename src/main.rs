@@ -202,6 +202,55 @@ fn draw_signal_bars(painter: &egui::Painter, bl: egui::Pos2, signal: u8, color: 
     }
 }
 
+fn lighten(c: Color32, amt: u8) -> Color32 {
+    Color32::from_rgb(c.r().saturating_add(amt), c.g().saturating_add(amt), c.b().saturating_add(amt))
+}
+
+fn darken(c: Color32, amt: u8) -> Color32 {
+    Color32::from_rgb(c.r().saturating_sub(amt), c.g().saturating_sub(amt), c.b().saturating_sub(amt))
+}
+
+// Gradient fill clipped to a rounded rect — avoids rectangular bleed past corners.
+fn gradient_v_rounded(painter: &egui::Painter, rect: egui::Rect, top: Color32, bot: Color32, cr: f32) {
+    use egui::epaint::Mesh;
+    let pi = std::f32::consts::PI;
+
+    let lerp_color = |y: f32| -> Color32 {
+        let t = ((y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+        Color32::from_rgb(
+            (top.r() as f32 + (bot.r() as f32 - top.r() as f32) * t) as u8,
+            (top.g() as f32 + (bot.g() as f32 - top.g() as f32) * t) as u8,
+            (top.b() as f32 + (bot.b() as f32 - top.b() as f32) * t) as u8,
+        )
+    };
+
+    // (corner-center, arc-start, arc-end) going clockwise from top-left
+    let corners: [(egui::Pos2, f32, f32); 4] = [
+        (egui::pos2(rect.left()  + cr, rect.top()    + cr), pi,       pi * 1.5),
+        (egui::pos2(rect.right() - cr, rect.top()    + cr), pi * 1.5, pi * 2.0),
+        (egui::pos2(rect.right() - cr, rect.bottom() - cr), 0.0,      pi * 0.5),
+        (egui::pos2(rect.left()  + cr, rect.bottom() - cr), pi * 0.5, pi),
+    ];
+
+    let segs = 5_u32;
+    let mut outline: Vec<egui::Pos2> = Vec::new();
+    for (center, a0, a1) in &corners {
+        for i in 0..=segs {
+            let a = a0 + (a1 - a0) * (i as f32 / segs as f32);
+            outline.push(egui::pos2(center.x + cr * a.cos(), center.y + cr * a.sin()));
+        }
+    }
+
+    let center = rect.center();
+    let mut m = Mesh::with_texture(egui::TextureId::default());
+    let ci = outline.len() as u32;
+    for p in &outline { m.colored_vertex(*p, lerp_color(p.y)); }
+    m.colored_vertex(center, lerp_color(center.y));
+    let n = outline.len() as u32;
+    for i in 0..n { m.add_triangle(ci, i, (i + 1) % n); }
+    painter.add(egui::Shape::mesh(m));
+}
+
 fn apply_theme(ctx: &egui::Context) {
     let mut v = egui::Visuals::light();
     v.panel_fill          = WIN_BG;
@@ -360,10 +409,8 @@ impl eframe::App for WifiApp {
                 let close = ui.interact(close_rect, Id::new("close_btn"), egui::Sense::click());
                 let close_fill = if close.hovered() { CLOSE_H } else { CLOSE_N };
                 let close_vis = close_rect.shrink2(egui::vec2(3.0, 3.0));
-                ui.painter().rect_filled(close_vis, CornerRadius::same(4), close_fill);
-                gradient_v(ui.painter(), close_vis,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 25),
-                    Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+                gradient_v_rounded(ui.painter(), close_vis,
+                    lighten(close_fill, 25), darken(close_fill, 20), 4.0);
                 draw_x(ui.painter(), close_rect.center(), 4.5, Color32::WHITE);
                 if close.clicked() { should_close = true; }
             });
