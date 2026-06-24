@@ -32,6 +32,10 @@ const BORDER:  Color32 = Color32::from_rgb(168, 165, 160);
 const SUCCESS: Color32 = Color32::from_rgb(28, 132, 28);
 const BAR_DIM: Color32 = Color32::from_rgb(178, 175, 170);
 
+// Toggle
+const TOGGLE_ON:  Color32 = Color32::from_rgb( 52, 199,  89); // iOS green
+const TOGGLE_OFF: Color32 = Color32::from_rgb(142, 142, 147); // neutral gray
+
 // Buttons
 const BTN_FACE:   Color32 = Color32::from_rgb(224, 221, 216);
 const BTN_CONN:   Color32 = Color32::from_rgb(13,  105, 213); // Connect (blue)
@@ -83,6 +87,8 @@ struct WifiApp {
 
     // Info view (view/edit saved connection details)
     info: Option<InfoState>,
+
+    wifi_enabled: bool,
 }
 
 // ── nmcli helpers ─────────────────────────────────────────────────────────────
@@ -252,6 +258,12 @@ fn fetch_info(ssid: &str, in_use: bool) -> InfoState {
     s
 }
 
+fn check_wifi_enabled() -> bool {
+    Command::new("nmcli").args(["radio", "wifi"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
+        .unwrap_or(true)
+}
+
 fn run_nmcli_bg(args: Vec<&'static str>, owned: Vec<String>, status: Arc<Mutex<String>>, ok_msg: String) {
     thread::spawn(move || {
         let mut cmd = Command::new("nmcli");
@@ -366,6 +378,31 @@ fn gradient_v_rounded(painter: &egui::Painter, rect: egui::Rect, top: Color32, b
     let n = outline.len() as u32;
     for i in 0..n { m.add_triangle(ci, i, (i + 1) % n); }
     painter.add(egui::Shape::mesh(m));
+}
+
+fn draw_toggle(ui: &mut egui::Ui, id: Id, on: bool) -> egui::Response {
+    let w = 38.0_f32;
+    let h = 22.0_f32;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool(id, on);
+        let bg = Color32::from_rgb(
+            (TOGGLE_OFF.r() as f32 + (TOGGLE_ON.r() as f32 - TOGGLE_OFF.r() as f32) * t) as u8,
+            (TOGGLE_OFF.g() as f32 + (TOGGLE_ON.g() as f32 - TOGGLE_OFF.g() as f32) * t) as u8,
+            (TOGGLE_OFF.b() as f32 + (TOGGLE_ON.b() as f32 - TOGGLE_OFF.b() as f32) * t) as u8,
+        );
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::same(11), bg);
+        let margin = 2.5_f32;
+        let cr = h / 2.0 - margin;
+        let cx = rect.left() + h / 2.0 + t * (w - h);
+        let cy = rect.center().y;
+        // Subtle drop shadow
+        p.circle_filled(egui::pos2(cx, cy + 1.0), cr, Color32::from_rgba_unmultiplied(0, 0, 0, 35));
+        p.circle_filled(egui::pos2(cx, cy), cr, Color32::WHITE);
+    }
+    resp
 }
 
 fn apply_theme(ctx: &egui::Context) {
@@ -560,7 +597,9 @@ impl WifiApp {
         scanning:       bool,
         status:         &str,
     ) {
-        let mut scan_clicked = false;
+        let mut scan_clicked    = false;
+        let mut do_toggle_wifi  = false;
+        let wifi_enabled        = self.wifi_enabled;
 
         // Sub-header
         egui::TopBottomPanel::top("header")
@@ -569,27 +608,58 @@ impl WifiApp {
             .show(ctx, |ui| {
                 panel_bg(ui);
                 ui.horizontal(|ui| {
-                    if let Some(ssid) = connected_ssid {
-                        let (dot, _) = ui.allocate_exact_size(
-                            egui::vec2(12.0, 14.0), egui::Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, SUCCESS);
-                        ui.label(egui::RichText::new(format!("Connected: {ssid}"))
-                            .size(12.0).color(TEXT));
+                    if wifi_enabled {
+                        if let Some(ssid) = connected_ssid {
+                            let (dot, _) = ui.allocate_exact_size(
+                                egui::vec2(12.0, 14.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 4.0, SUCCESS);
+                            ui.label(egui::RichText::new(format!("Connected: {ssid}"))
+                                .size(12.0).color(TEXT));
+                        } else {
+                            ui.label(egui::RichText::new("Not connected")
+                                .size(12.0).color(SUBTEXT));
+                        }
                     } else {
-                        ui.label(egui::RichText::new("Not connected")
+                        ui.label(egui::RichText::new("Wi-Fi Off")
                             .size(12.0).color(SUBTEXT));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if scanning {
-                            ui.add(egui::Spinner::new().size(14.0).color(SUBTEXT));
-                        } else if neutral_btn(ui, "Scan", 52.0).clicked() {
-                            scan_clicked = true;
+                        if draw_toggle(ui, Id::new("wifi_toggle"), wifi_enabled).clicked() {
+                            do_toggle_wifi = true;
+                        }
+                        if wifi_enabled {
+                            ui.add_space(6.0);
+                            if scanning {
+                                ui.add(egui::Spinner::new().size(14.0).color(SUBTEXT));
+                            } else if neutral_btn(ui, "Scan", 52.0).clicked() {
+                                scan_clicked = true;
+                            }
                         }
                     });
                 });
             });
 
-        if scan_clicked {
+        if do_toggle_wifi {
+            self.wifi_enabled = !wifi_enabled;
+            if self.wifi_enabled {
+                *self.status.lock().unwrap() = "Turning Wi-Fi on…".into();
+                let st  = Arc::clone(&self.status);
+                let nw  = Arc::clone(&self.networks);
+                let sc  = Arc::clone(&self.scanning);
+                thread::spawn(move || {
+                    let _ = Command::new("nmcli").args(["radio", "wifi", "on"]).output();
+                    *st.lock().unwrap() = String::new();
+                    scan(nw, sc, st);
+                });
+            } else {
+                *self.networks.lock().unwrap() = Vec::new();
+                *self.status.lock().unwrap() = String::new();
+                self.selected_ssid = None;
+                thread::spawn(|| {
+                    let _ = Command::new("nmcli").args(["radio", "wifi", "off"]).output();
+                });
+            }
+        } else if scan_clicked {
             scan(Arc::clone(&self.networks), Arc::clone(&self.scanning), Arc::clone(&self.status));
         }
 
@@ -667,6 +737,13 @@ impl WifiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(LIST_BG).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
+                if !wifi_enabled {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(egui::RichText::new("Wi-Fi is turned off")
+                            .size(13.0).color(SUBTEXT));
+                    });
+                    return;
+                }
                 if networks.is_empty() && !scanning {
                     ui.centered_and_justified(|ui| {
                         ui.label(egui::RichText::new("No networks found — click Scan")
@@ -1000,7 +1077,10 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    let app = WifiApp::default();
-    scan(Arc::clone(&app.networks), Arc::clone(&app.scanning), Arc::clone(&app.status));
+    let mut app = WifiApp::default();
+    app.wifi_enabled = check_wifi_enabled();
+    if app.wifi_enabled {
+        scan(Arc::clone(&app.networks), Arc::clone(&app.scanning), Arc::clone(&app.status));
+    }
     eframe::run_native("Wi-Fi", options, Box::new(|_cc| Ok(Box::new(app))))
 }
