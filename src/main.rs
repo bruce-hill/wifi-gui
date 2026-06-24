@@ -619,7 +619,7 @@ impl WifiApp {
                 .inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 6 }))
             .show(ctx, |ui| {
                 panel_bg(ui);
-                ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     if wifi_enabled {
                         if let Some(ssid) = connected_ssid {
                             let (dot, _) = ui.allocate_exact_size(
@@ -691,7 +691,7 @@ impl WifiApp {
                 .inner_margin(egui::Margin { left: 8, right: 8, top: 7, bottom: 7 }))
             .show(ctx, |ui| {
                 panel_bg(ui);
-                ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     // Status text on the left
                     let msg = if !status.is_empty() { status }
                               else if scanning { "Scanning for networks…" }
