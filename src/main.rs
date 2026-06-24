@@ -258,6 +258,18 @@ fn fetch_info(ssid: &str, in_use: bool) -> InfoState {
     s
 }
 
+fn quick_fetch(networks: &Arc<Mutex<Vec<Network>>>) {
+    if let Ok(out) = Command::new("nmcli")
+        .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
+               "device", "wifi", "list", "--rescan", "no"])
+        .output()
+    {
+        if out.status.success() {
+            *networks.lock().unwrap() = parse_networks(&String::from_utf8_lossy(&out.stdout));
+        }
+    }
+}
+
 fn check_wifi_enabled() -> bool {
     Command::new("nmcli").args(["radio", "wifi"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
@@ -1080,6 +1092,7 @@ fn main() -> eframe::Result {
     let mut app = WifiApp::default();
     app.wifi_enabled = check_wifi_enabled();
     if app.wifi_enabled {
+        quick_fetch(&app.networks);
         scan(Arc::clone(&app.networks), Arc::clone(&app.scanning), Arc::clone(&app.status));
     }
     eframe::run_native("Wi-Fi", options, Box::new(|_cc| Ok(Box::new(app))))
