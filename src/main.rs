@@ -1,53 +1,93 @@
-use eframe::egui;
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Stroke};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+// ── Palette ───────────────────────────────────────────────────────────────────
+// Title bar: deep navy → medium blue gradient
+const TITLE_L:    Color32 = Color32::from_rgb(10,  42, 115);
+const TITLE_R:    Color32 = Color32::from_rgb(46, 118, 200);
+const TITLE_TEXT: Color32 = Color32::WHITE;
+const TITLE_H:    f32     = 26.0;
+const CLOSE_N:    Color32 = Color32::from_rgb(172, 32, 32);
+const CLOSE_H:    Color32 = Color32::from_rgb(208, 50, 50);
+
+// Panel areas (header / footer): warm silver, subtle gradient
+const PANEL_T: Color32 = Color32::from_rgb(248, 246, 242);
+const PANEL_B: Color32 = Color32::from_rgb(228, 225, 219);
+
+// Content
+const WIN_BG:   Color32 = Color32::from_rgb(238, 235, 230);
+const LIST_BG:  Color32 = Color32::WHITE;
+const SEL_BG:   Color32 = Color32::from_rgb(13, 105, 213);
+const SEL_TEXT: Color32 = Color32::WHITE;
+const ROW_HOV:  Color32 = Color32::from_rgb(230, 242, 255);
+const ROW_CONN: Color32 = Color32::from_rgb(238, 252, 238);
+const SEP:      Color32 = Color32::from_rgb(226, 223, 218);
+
+// Text
+const TEXT:    Color32 = Color32::from_rgb(22,  22,  22);
+const SUBTEXT: Color32 = Color32::from_rgb(112, 109, 104);
+const BORDER:  Color32 = Color32::from_rgb(168, 165, 160);
+const SUCCESS: Color32 = Color32::from_rgb(28, 132, 28);
+const BAR_DIM: Color32 = Color32::from_rgb(178, 175, 170);
+
+// Buttons
+const BTN_FACE:   Color32 = Color32::from_rgb(224, 221, 216);
+const BTN_CONN:   Color32 = Color32::from_rgb(13,  105, 213); // Connect (blue)
+const BTN_DISC:   Color32 = Color32::from_rgb(175,  38,  22); // Disconnect (red)
+const BTN_INFO:   Color32 = Color32::from_rgb( 96,  93,  88); // Info (dark gray)
+const BTN_FORGET: Color32 = Color32::from_rgb(175,  38,  22);
+const BTN_SAVE:   Color32 = Color32::from_rgb(13,  105, 213);
+const BTN_DIS_BG: Color32 = Color32::from_rgb(200, 197, 192);
+const BTN_DIS_FG: Color32 = Color32::from_rgb(142, 139, 134);
+
+const ROW_H: f32 = 50.0;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 #[derive(Clone, Debug)]
 struct Network {
-    ssid: String,
-    signal: u8, // 0–100
+    ssid:    String,
+    signal:  u8,
     secured: bool,
-    in_use: bool,
+    in_use:  bool,
 }
 
 #[derive(Default)]
 struct WifiApp {
     networks: Arc<Mutex<Vec<Network>>>,
     scanning: Arc<Mutex<bool>>,
-    status: Arc<Mutex<String>>,
-    password: String,
+    status:   Arc<Mutex<String>>,
+
+    selected_ssid: Option<String>,
+
+    // Password-entry view (connecting to a secured network for the first time)
     connecting_to: Option<String>,
+    password:      String,
     show_password: bool,
+
+    // Info view (view/edit saved connection details)
+    info_ssid:         Option<String>,
+    info_has_profile:  bool,
+    info_password:     String,
+    info_show_pw:      bool,
 }
 
+// ── nmcli helpers ─────────────────────────────────────────────────────────────
 fn parse_networks(output: &str) -> Vec<Network> {
     let mut networks: Vec<Network> = Vec::new();
     for line in output.lines().skip(1) {
-        // nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY with colon separator
         let parts: Vec<&str> = line.splitn(5, ':').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let in_use = parts[0].trim() == "*";
-        let ssid = parts[1].replace("\\:", ":").trim().to_string();
+        if parts.len() < 4 { continue; }
+        let in_use  = parts[0].trim() == "*";
+        let ssid    = parts[1].replace("\\:", ":").trim().to_string();
         let signal: u8 = parts[2].trim().parse().unwrap_or(0);
-        let security = parts[3].trim();
-        let secured = !security.is_empty() && security != "--";
-
-        if ssid.is_empty() || ssid == "--" {
+        let secured = { let s = parts[3].trim(); !s.is_empty() && s != "--" };
+        if ssid.is_empty() || ssid == "--" { continue; }
+        if let Some(ex) = networks.iter_mut().find(|n| n.ssid == ssid) {
+            if in_use || signal > ex.signal { ex.signal = signal; ex.in_use = in_use; }
             continue;
         }
-
-        // Deduplicate: keep strongest signal or the active entry.
-        if let Some(existing) = networks.iter_mut().find(|n| n.ssid == ssid) {
-            if in_use || signal > existing.signal {
-                existing.signal = signal;
-                existing.in_use = in_use;
-            }
-            continue;
-        }
-
         networks.push(Network { ssid, signal, secured, in_use });
     }
     networks.sort_by(|a, b| b.in_use.cmp(&a.in_use).then(b.signal.cmp(&a.signal)));
@@ -56,195 +96,681 @@ fn parse_networks(output: &str) -> Vec<Network> {
 
 fn scan(networks: Arc<Mutex<Vec<Network>>>, scanning: Arc<Mutex<bool>>, status: Arc<Mutex<String>>) {
     *scanning.lock().unwrap() = true;
-    *status.lock().unwrap() = "Scanning…".into();
+    *status.lock().unwrap() = String::new();
     thread::spawn(move || {
         let out = Command::new("nmcli")
-            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "yes"])
+            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
+                   "device", "wifi", "list", "--rescan", "yes"])
             .output();
         match out {
             Ok(o) if o.status.success() => {
-                let text = String::from_utf8_lossy(&o.stdout);
-                *networks.lock().unwrap() = parse_networks(&text);
+                *networks.lock().unwrap() = parse_networks(&String::from_utf8_lossy(&o.stdout));
                 *status.lock().unwrap() = String::new();
             }
-            Ok(o) => {
-                *status.lock().unwrap() = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            }
-            Err(e) => {
-                *status.lock().unwrap() = format!("nmcli error: {e}");
-            }
+            Ok(o)  => { *status.lock().unwrap() = String::from_utf8_lossy(&o.stderr).trim().to_string(); }
+            Err(e) => { *status.lock().unwrap() = format!("nmcli: {e}"); }
         }
         *scanning.lock().unwrap() = false;
     });
 }
 
-fn signal_bars(signal: u8) -> &'static str {
-    match signal {
-        75..=100 => "▂▄▆█",
-        50..=74  => "▂▄▆░",
-        25..=49  => "▂▄░░",
-        _        => "▂░░░",
+// Returns (has_profile, saved_psk).  Runs synchronously (< 50 ms).
+fn fetch_connection_info(ssid: &str) -> (bool, String) {
+    let has = Command::new("nmcli")
+        .args(["connection", "show", "id", ssid])
+        .output().map(|o| o.status.success()).unwrap_or(false);
+    if !has { return (false, String::new()); }
+
+    let pw = Command::new("nmcli")
+        .args(["--show-secrets", "-t", "-f", "802-11-wireless-security.psk",
+               "connection", "show", "id", ssid])
+        .output().ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let v = t.splitn(2, ':').nth(1).unwrap_or("").to_string();
+            if v.is_empty() || v == "--" { None } else { Some(v) }
+        }).unwrap_or_default();
+
+    (true, pw)
+}
+
+fn run_nmcli_bg(args: Vec<&'static str>, owned: Vec<String>, status: Arc<Mutex<String>>, ok_msg: String) {
+    thread::spawn(move || {
+        let mut cmd = Command::new("nmcli");
+        for a in &args  { cmd.arg(a); }
+        for a in &owned { cmd.arg(a); }
+        match cmd.output() {
+            Ok(o) if o.status.success() => { *status.lock().unwrap() = ok_msg; }
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                *status.lock().unwrap() = if s.is_empty() {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                } else { s };
+            }
+            Err(e) => { *status.lock().unwrap() = format!("nmcli: {e}"); }
+        }
+    });
+}
+
+// ── Drawing helpers ───────────────────────────────────────────────────────────
+fn gradient_h(painter: &egui::Painter, rect: egui::Rect, left: Color32, right: Color32) {
+    use egui::epaint::Mesh;
+    let mut m = Mesh::with_texture(egui::TextureId::default());
+    m.colored_vertex(rect.left_top(),     left);
+    m.colored_vertex(rect.right_top(),    right);
+    m.colored_vertex(rect.right_bottom(), right);
+    m.colored_vertex(rect.left_bottom(),  left);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(m));
+}
+
+fn gradient_v(painter: &egui::Painter, rect: egui::Rect, top: Color32, bot: Color32) {
+    use egui::epaint::Mesh;
+    let mut m = Mesh::with_texture(egui::TextureId::default());
+    m.colored_vertex(rect.left_top(),     top);
+    m.colored_vertex(rect.right_top(),    top);
+    m.colored_vertex(rect.right_bottom(), bot);
+    m.colored_vertex(rect.left_bottom(),  bot);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(m));
+}
+
+fn draw_x(painter: &egui::Painter, center: egui::Pos2, half: f32, color: Color32) {
+    let s = Stroke::new(1.6, color);
+    painter.line_segment([egui::pos2(center.x - half, center.y - half),
+                          egui::pos2(center.x + half, center.y + half)], s);
+    painter.line_segment([egui::pos2(center.x + half, center.y - half),
+                          egui::pos2(center.x - half, center.y + half)], s);
+}
+
+fn draw_signal_bars(painter: &egui::Painter, bl: egui::Pos2, signal: u8, color: Color32) {
+    let bar_w = 4.5_f32;
+    let gap   = 2.0_f32;
+    let max_h = 16.0_f32;
+    let active: u8 = match signal { 75..=100 => 4, 50..=74 => 3, 25..=49 => 2, _ => 1 };
+    for i in 0..4u8 {
+        let h   = max_h * (f32::from(i) + 1.0) / 4.0;
+        let x   = bl.x + f32::from(i) * (bar_w + gap);
+        let col = if i < active { color } else { BAR_DIM };
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::pos2(x, bl.y - h), egui::vec2(bar_w, h)),
+            CornerRadius::same(1), col,
+        );
     }
 }
 
+fn apply_theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::light();
+    v.panel_fill          = WIN_BG;
+    v.window_fill         = WIN_BG;
+    v.window_stroke       = Stroke::new(1.0, BORDER);
+    v.override_text_color = Some(TEXT);
+    v.selection.bg_fill   = SEL_BG;
+    let cr = CornerRadius::same(3);
+    macro_rules! w { ($w:expr, $bg:expr, $str:expr, $fg:expr) => {{
+        $w.bg_fill      = $bg;
+        $w.bg_stroke    = $str;
+        $w.corner_radius = cr;
+        $w.fg_stroke    = $fg;
+    }}; }
+    w!(v.widgets.noninteractive, WIN_BG,
+       Stroke::new(1.0, BORDER), Stroke::new(1.0, TEXT));
+    w!(v.widgets.inactive, BTN_FACE,
+       Stroke::new(1.0, BORDER), Stroke::new(1.0, TEXT));
+    w!(v.widgets.hovered,
+       Color32::from_rgb(210, 207, 202),
+       Stroke::new(1.0, Color32::from_rgb(112, 109, 104)),
+       Stroke::new(1.0, TEXT));
+    w!(v.widgets.active, BTN_CONN,
+       Stroke::NONE, Stroke::new(1.0, Color32::WHITE));
+    ctx.set_visuals(v);
+}
+
+// ── Panel helpers ─────────────────────────────────────────────────────────────
+// Draw a gradient panel background (call first inside a panel show closure).
+fn panel_bg(ui: &egui::Ui) {
+    gradient_v(ui.painter(), ui.clip_rect(), PANEL_T, PANEL_B);
+}
+
+fn colored_btn(
+    ui: &mut egui::Ui,
+    label: &str,
+    fill: Color32,
+    text_col: Color32,
+    min_w: f32,
+) -> egui::Response {
+    let border = Color32::from_rgb(
+        fill.r().saturating_sub(30),
+        fill.g().saturating_sub(30),
+        fill.b().saturating_sub(30),
+    );
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(text_col))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, border))
+            .min_size(egui::vec2(min_w, 26.0)),
+    );
+    gradient_v(ui.painter(), resp.rect,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 25),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 18));
+    resp
+}
+
+fn neutral_btn(ui: &mut egui::Ui, label: &str, min_w: f32) -> egui::Response {
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(TEXT))
+            .fill(BTN_FACE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .min_size(egui::vec2(min_w, 26.0)),
+    );
+    gradient_v(ui.painter(), resp.rect,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 25),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 18));
+    resp
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 impl WifiApp {
-    fn connect(&mut self, ssid: &str, password: Option<&str>) {
-        let ssid = ssid.to_string();
-        let password = password.map(str::to_string);
-        let status = Arc::clone(&self.status);
-        *status.lock().unwrap() = format!("Connecting to {ssid}…");
+    fn do_connect(&mut self, ssid: &str, password: Option<&str>) {
+        let ssid_s = ssid.to_string();
+        let pw     = password.map(str::to_string);
+        let st     = Arc::clone(&self.status);
+        *st.lock().unwrap() = format!("Connecting to {ssid_s}…");
         thread::spawn(move || {
             let mut cmd = Command::new("nmcli");
-            cmd.args(["device", "wifi", "connect", &ssid]);
-            if let Some(pw) = &password {
-                cmd.args(["password", pw]);
-            }
-            let out = cmd.output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    *status.lock().unwrap() = format!("Connected to {ssid}");
-                }
+            cmd.args(["device", "wifi", "connect", &ssid_s]);
+            if let Some(p) = &pw { cmd.args(["password", p]); }
+            match cmd.output() {
+                Ok(o) if o.status.success() => { *st.lock().unwrap() = format!("Connected to {ssid_s}"); }
                 Ok(o) => {
                     let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                    *status.lock().unwrap() = if msg.is_empty() {
+                    *st.lock().unwrap() = if msg.is_empty() {
                         String::from_utf8_lossy(&o.stdout).trim().to_string()
-                    } else {
-                        msg
-                    };
+                    } else { msg };
                 }
-                Err(e) => {
-                    *status.lock().unwrap() = format!("nmcli error: {e}");
-                }
+                Err(e) => { *st.lock().unwrap() = format!("nmcli: {e}"); }
             }
         });
+    }
+
+    fn do_disconnect(&self, ssid: &str) {
+        let st = Arc::clone(&self.status);
+        let s  = ssid.to_string();
+        *st.lock().unwrap() = format!("Disconnecting from {s}…");
+        run_nmcli_bg(
+            vec!["connection", "down", "id"],
+            vec![s.clone()],
+            st,
+            format!("Disconnected from {s}"),
+        );
     }
 }
 
 impl eframe::App for WifiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll background threads every 500ms.
+        apply_theme(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
-        let scanning = *self.scanning.lock().unwrap();
-        let status = self.status.lock().unwrap().clone();
-        let networks = self.networks.lock().unwrap().clone();
+        let scanning      = *self.scanning.lock().unwrap();
+        let status        = self.status.lock().unwrap().clone();
+        let networks      = self.networks.lock().unwrap().clone();
+        let connected_ssid = networks.iter().find(|n| n.in_use).map(|n| n.ssid.clone());
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Wi-Fi");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if scanning {
-                        ui.spinner();
-                        ui.label("Scanning…");
-                    } else if ui.button("⟳  Scan").clicked() {
-                        scan(
-                            Arc::clone(&self.networks),
-                            Arc::clone(&self.scanning),
-                            Arc::clone(&self.status),
-                        );
-                    }
-                });
+        // ── Custom title bar ──────────────────────────────────────────────────
+        let mut should_close = false;
+        egui::TopBottomPanel::top("titlebar")
+            .exact_height(TITLE_H)
+            .frame(egui::Frame::new())
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                let full      = ui.max_rect();
+                let close_w   = TITLE_H * 1.5;
+                let close_rect = egui::Rect::from_min_size(
+                    egui::pos2(full.right() - close_w, full.top()),
+                    egui::vec2(close_w, TITLE_H),
+                );
+                let drag_rect = egui::Rect::from_min_max(
+                    full.min, egui::pos2(full.right() - close_w, full.bottom()),
+                );
+
+                // Gradient title background
+                gradient_h(ui.painter(), full, TITLE_L, TITLE_R);
+                // Top-to-bottom depth: highlight on top, shadow on bottom
+                gradient_v(ui.painter(), full,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 25),
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+
+                // Draggable region
+                let drag = ui.interact(drag_rect, Id::new("title_drag"), egui::Sense::drag());
+                if drag.dragged() { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag); }
+
+                // Title text
+                ui.painter().text(
+                    egui::pos2(full.left() + 10.0, full.center().y),
+                    Align2::LEFT_CENTER,
+                    "Wi-Fi",
+                    FontId::proportional(13.0),
+                    TITLE_TEXT,
+                );
+
+                // Close button
+                let close = ui.interact(close_rect, Id::new("close_btn"), egui::Sense::click());
+                let close_fill = if close.hovered() { CLOSE_H } else { CLOSE_N };
+                let close_vis = close_rect.shrink2(egui::vec2(3.0, 3.0));
+                ui.painter().rect_filled(close_vis, CornerRadius::same(4), close_fill);
+                gradient_v(ui.painter(), close_vis,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 25),
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 30));
+                draw_x(ui.painter(), close_rect.center(), 4.5, Color32::WHITE);
+                if close.clicked() { should_close = true; }
             });
 
-            ui.separator();
+        if should_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
 
-            if networks.is_empty() && !scanning {
-                ui.centered_and_justified(|ui| ui.label("No networks found. Click Scan."));
-            }
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for net in &networks {
-                    let label = format!(
-                        "{} {}  {}{}",
-                        signal_bars(net.signal),
-                        net.ssid,
-                        if net.secured { "🔒" } else { "   " },
-                        if net.in_use { " ✓" } else { "" },
-                    );
-                    let btn = egui::Button::new(
-                        egui::RichText::new(&label).monospace(),
-                    )
-                    .fill(if net.in_use {
-                        egui::Color32::from_rgb(30, 70, 30)
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .min_size(egui::vec2(ui.available_width(), 36.0));
-
-                    if ui.add(btn).clicked() {
-                        if net.secured {
-                            self.connecting_to = Some(net.ssid.clone());
-                            self.password.clear();
-                            self.show_password = false;
-                        } else {
-                            let ssid = net.ssid.clone();
-                            self.connect(&ssid, None);
-                        }
-                    }
-                }
-            });
-
-            if !status.is_empty() {
-                ui.separator();
-                ui.label(&status);
-            }
-        });
-
-        // Password dialog
-        if let Some(ssid) = self.connecting_to.clone() {
-            let mut open = true;
-            egui::Window::new(format!("Connect to {ssid}"))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    ui.label("Password:");
-                    let pw_resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.password)
-                            .password(!self.show_password)
-                            .desired_width(260.0),
-                    );
-                    pw_resp.request_focus();
-                    ui.checkbox(&mut self.show_password, "Show password");
-                    ui.horizontal(|ui| {
-                        let connect = ui.button("Connect").clicked();
-                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if connect || enter {
-                            let pw = self.password.clone();
-                            self.connect(&ssid, Some(&pw));
-                            self.connecting_to = None;
-                            self.password.clear();
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.connecting_to = None;
-                            self.password.clear();
-                        }
-                    });
-                });
-            if !open {
-                self.connecting_to = None;
-                self.password.clear();
-            }
+        // ── Route to the active view ──────────────────────────────────────────
+        if let Some(ssid) = self.info_ssid.clone() {
+            self.show_info_view(ctx, &ssid, &networks);
+        } else if let Some(ssid) = self.connecting_to.clone() {
+            self.show_password_view(ctx, &ssid, &status);
+        } else {
+            self.show_network_list(ctx, &networks, &connected_ssid, scanning, &status);
         }
     }
 }
 
+// ── Views ─────────────────────────────────────────────────────────────────────
+impl WifiApp {
+    fn show_network_list(
+        &mut self,
+        ctx:           &egui::Context,
+        networks:      &[Network],
+        connected_ssid: &Option<String>,
+        scanning:       bool,
+        status:         &str,
+    ) {
+        let mut scan_clicked = false;
+
+        // Sub-header
+        egui::TopBottomPanel::top("header")
+            .frame(egui::Frame::new()
+                .inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 6 }))
+            .show(ctx, |ui| {
+                panel_bg(ui);
+                ui.horizontal(|ui| {
+                    if let Some(ssid) = connected_ssid {
+                        let (dot, _) = ui.allocate_exact_size(
+                            egui::vec2(12.0, 14.0), egui::Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 4.0, SUCCESS);
+                        ui.label(egui::RichText::new(format!("Connected: {ssid}"))
+                            .size(12.0).color(TEXT));
+                    } else {
+                        ui.label(egui::RichText::new("Not connected")
+                            .size(12.0).color(SUBTEXT));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if scanning {
+                            ui.add(egui::Spinner::new().size(14.0).color(SUBTEXT));
+                        } else if neutral_btn(ui, "Scan", 52.0).clicked() {
+                            scan_clicked = true;
+                        }
+                    });
+                });
+            });
+
+        if scan_clicked {
+            scan(Arc::clone(&self.networks), Arc::clone(&self.scanning), Arc::clone(&self.status));
+        }
+
+        // Bottom bar: status | [Info?] [Connect/Disconnect]
+        let selected_net = self.selected_ssid.as_ref()
+            .and_then(|s| networks.iter().find(|n| n.ssid == *s))
+            .cloned();
+        let is_in_use = selected_net.as_ref().map(|n| n.in_use).unwrap_or(false);
+        let can_act   = selected_net.is_some();
+
+        let mut do_connect    = false;
+        let mut do_disconnect = false;
+        let mut do_info       = false;
+
+        egui::TopBottomPanel::bottom("bottom_bar")
+            .frame(egui::Frame::new()
+                .inner_margin(egui::Margin { left: 8, right: 8, top: 7, bottom: 7 }))
+            .show(ctx, |ui| {
+                panel_bg(ui);
+                ui.horizontal(|ui| {
+                    // Status text on the left
+                    let msg = if !status.is_empty() { status }
+                              else if scanning { "Scanning for networks…" }
+                              else { "" };
+                    ui.label(egui::RichText::new(msg).size(11.0).color(SUBTEXT));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Primary action button
+                        if is_in_use {
+                            if colored_btn(ui, "Disconnect", BTN_DISC, Color32::WHITE, 95.0).clicked() {
+                                do_disconnect = true;
+                            }
+                        } else {
+                            let (fill, tc) = if can_act {
+                                (BTN_CONN, Color32::WHITE)
+                            } else {
+                                (BTN_DIS_BG, BTN_DIS_FG)
+                            };
+                            if colored_btn(ui, "Connect", fill, tc, 85.0).clicked() && can_act {
+                                do_connect = true;
+                            }
+                        }
+                        // Info button (only when a network is selected)
+                        if can_act {
+                            ui.add_space(4.0);
+                            if colored_btn(ui, "Info", BTN_INFO, Color32::WHITE, 52.0).clicked() {
+                                do_info = true;
+                            }
+                        }
+                    });
+                });
+            });
+
+        if do_disconnect {
+            if let Some(net) = &selected_net {
+                self.do_disconnect(&net.ssid);
+            }
+        } else if do_connect {
+            if let Some(net) = selected_net.clone() {
+                if net.secured {
+                    self.connecting_to = Some(net.ssid.clone());
+                    self.password.clear();
+                    self.show_password = false;
+                } else {
+                    self.do_connect(&net.ssid, None);
+                }
+            }
+        } else if do_info {
+            if let Some(net) = &selected_net {
+                let (has_profile, pw) = fetch_connection_info(&net.ssid);
+                self.info_ssid        = Some(net.ssid.clone());
+                self.info_has_profile = has_profile;
+                self.info_password    = pw;
+                self.info_show_pw     = false;
+            }
+        }
+
+        // Network list
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(LIST_BG).inner_margin(egui::Margin::ZERO))
+            .show(ctx, |ui| {
+                if networks.is_empty() && !scanning {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(egui::RichText::new("No networks found — click Scan")
+                            .size(13.0).color(SUBTEXT));
+                    });
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for net in networks {
+                        let avail_w  = ui.available_width();
+                        let selected = self.selected_ssid.as_deref() == Some(&net.ssid);
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(avail_w, ROW_H), egui::Sense::click());
+
+                        if ui.is_rect_visible(rect) {
+                            let p = ui.painter();
+
+                            let bg = if selected       { SEL_BG }
+                                     else if resp.hovered() { ROW_HOV }
+                                     else if net.in_use     { ROW_CONN }
+                                     else                   { LIST_BG };
+                            p.rect_filled(rect, CornerRadius::ZERO, bg);
+                            p.line_segment(
+                                [egui::pos2(rect.left(), rect.bottom()),
+                                 egui::pos2(rect.right(), rect.bottom())],
+                                Stroke::new(1.0, SEP),
+                            );
+
+                            let tc  = if selected { SEL_TEXT } else if net.in_use { Color32::from_rgb(24,112,24) } else { TEXT };
+                            let sc  = if selected { Color32::from_rgb(185, 210, 248) } else { SUBTEXT };
+                            let bc  = if selected { SEL_TEXT } else if net.in_use { Color32::from_rgb(24,112,24) } else { Color32::from_rgb(64,64,64) };
+
+                            draw_signal_bars(p,
+                                egui::pos2(rect.left() + 12.0, rect.center().y + 9.0),
+                                net.signal, bc);
+
+                            let tx = rect.left() + 52.0;
+                            p.text(egui::pos2(tx, rect.center().y - 6.0),
+                                Align2::LEFT_CENTER, &net.ssid,
+                                FontId::proportional(13.5), tc);
+
+                            let sub = if net.in_use { "Connected" }
+                                      else if net.secured { "Secured" }
+                                      else { "Open" };
+                            p.text(egui::pos2(tx, rect.center().y + 9.0),
+                                Align2::LEFT_CENTER, sub,
+                                FontId::proportional(11.0), sc);
+
+                            // Right-side icon
+                            let rx = rect.right() - 12.0;
+                            let cy = rect.center().y;
+                            if net.in_use {
+                                // Checkmark drawn as two line segments
+                                let col = if selected { SEL_TEXT } else { SUCCESS };
+                                let o = egui::pos2(rx - 10.0, cy);
+                                p.line_segment([egui::pos2(o.x, o.y + 1.0),
+                                                egui::pos2(o.x + 4.0, o.y + 5.0)],
+                                               Stroke::new(2.0, col));
+                                p.line_segment([egui::pos2(o.x + 3.5, o.y + 5.0),
+                                                egui::pos2(o.x + 9.0, o.y - 3.0)],
+                                               Stroke::new(2.0, col));
+                            } else if net.secured {
+                                // Lock: simple rect + arc drawn with lines
+                                let lx = rx - 7.0;
+                                let ly = cy + 1.0;
+                                let lw = 8.0_f32;
+                                let lh = 6.0_f32;
+                                let col = sc;
+                                // shackle (top arc approximated by two diagonal lines + top)
+                                p.line_segment([egui::pos2(lx + 1.5, ly - 1.0),
+                                                egui::pos2(lx + 1.5, ly - 3.5)],
+                                               Stroke::new(1.4, col));
+                                p.line_segment([egui::pos2(lx + lw - 1.5, ly - 1.0),
+                                                egui::pos2(lx + lw - 1.5, ly - 3.5)],
+                                               Stroke::new(1.4, col));
+                                p.line_segment([egui::pos2(lx + 1.5, ly - 3.5),
+                                                egui::pos2(lx + lw - 1.5, ly - 3.5)],
+                                               Stroke::new(1.4, col));
+                                // body
+                                p.rect_filled(
+                                    egui::Rect::from_min_size(egui::pos2(lx, ly), egui::vec2(lw, lh)),
+                                    CornerRadius::same(1), col);
+                            }
+                        }
+
+                        if resp.clicked() {
+                            self.selected_ssid = Some(net.ssid.clone());
+                        }
+                    }
+                });
+            });
+    }
+
+    fn show_password_view(&mut self, ctx: &egui::Context, ssid: &str, status: &str) {
+        let mut do_connect = false;
+        let mut do_cancel  = false;
+
+        egui::TopBottomPanel::bottom("pw_bar")
+            .frame(egui::Frame::new()
+                .inner_margin(egui::Margin { left: 8, right: 8, top: 7, bottom: 7 }))
+            .show(ctx, |ui| {
+                panel_bg(ui);
+                ui.horizontal(|ui| {
+                    if neutral_btn(ui, "Cancel", 75.0).clicked() { do_cancel = true; }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if colored_btn(ui, "Connect", BTN_CONN, Color32::WHITE, 85.0).clicked() || enter {
+                            do_connect = true;
+                        }
+                    });
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new()
+                .fill(WIN_BG)
+                .inner_margin(egui::Margin { left: 20, right: 20, top: 22, bottom: 8 }))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(
+                    format!("Connect to \u{201c}{ssid}\u{201d}"))
+                    .size(15.0).strong().color(TEXT));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Enter the network password:")
+                    .size(12.0).color(SUBTEXT));
+                ui.add_space(14.0);
+                ui.add(egui::TextEdit::singleline(&mut self.password)
+                    .password(!self.show_password)
+                    .desired_width(f32::INFINITY)
+                    .font(FontId::proportional(13.0))
+                    .hint_text("Password")).request_focus();
+                ui.add_space(8.0);
+                ui.checkbox(&mut self.show_password,
+                    egui::RichText::new("Show password").size(12.0).color(SUBTEXT));
+                if !status.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(status).size(11.0).color(SUBTEXT));
+                }
+            });
+
+        if do_connect {
+            let pw = self.password.clone();
+            let s  = ssid.to_string();
+            self.do_connect(&s, Some(&pw));
+            self.connecting_to = None;
+            self.password.clear();
+        } else if do_cancel {
+            self.connecting_to = None;
+            self.password.clear();
+        }
+    }
+
+    fn show_info_view(&mut self, ctx: &egui::Context, ssid: &str, networks: &[Network]) {
+        let net       = networks.iter().find(|n| n.ssid == ssid);
+        let is_secured = net.map(|n| n.secured).unwrap_or(true);
+        let in_use     = net.map(|n| n.in_use).unwrap_or(false);
+
+        let mut go_back    = false;
+        let mut do_forget  = false;
+        let mut do_save    = false;
+
+        egui::TopBottomPanel::bottom("info_bar")
+            .frame(egui::Frame::new()
+                .inner_margin(egui::Margin { left: 8, right: 8, top: 7, bottom: 7 }))
+            .show(ctx, |ui| {
+                panel_bg(ui);
+                ui.horizontal(|ui| {
+                    if neutral_btn(ui, "Back", 60.0).clicked() { go_back = true; }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.info_has_profile && is_secured {
+                            if colored_btn(ui, "Save Password", BTN_SAVE, Color32::WHITE, 108.0).clicked() {
+                                do_save = true;
+                            }
+                            ui.add_space(4.0);
+                        }
+                        if self.info_has_profile {
+                            if colored_btn(ui, "Forget", BTN_FORGET, Color32::WHITE, 68.0).clicked() {
+                                do_forget = true;
+                            }
+                        }
+                    });
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new()
+                .fill(WIN_BG)
+                .inner_margin(egui::Margin { left: 20, right: 20, top: 22, bottom: 8 }))
+            .show(ctx, |ui| {
+                // SSID + status
+                ui.label(egui::RichText::new(ssid).size(16.0).strong().color(TEXT));
+                ui.add_space(4.0);
+                if in_use {
+                    ui.horizontal(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(
+                            egui::vec2(12.0, 14.0), egui::Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 4.0, SUCCESS);
+                        ui.label(egui::RichText::new("Currently connected")
+                            .size(12.0).color(SUCCESS));
+                    });
+                } else {
+                    ui.label(egui::RichText::new("Not connected").size(12.0).color(SUBTEXT));
+                }
+
+                ui.add_space(18.0);
+
+                if !self.info_has_profile {
+                    ui.label(egui::RichText::new("No saved profile for this network.")
+                        .size(13.0).color(SUBTEXT));
+                } else if is_secured {
+                    ui.label(egui::RichText::new("Saved password:").size(12.0).color(SUBTEXT));
+                    ui.add_space(6.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.info_password)
+                        .password(!self.info_show_pw)
+                        .desired_width(f32::INFINITY)
+                        .font(FontId::proportional(13.0))
+                        .hint_text("(none saved)"));
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut self.info_show_pw,
+                        egui::RichText::new("Show password").size(12.0).color(SUBTEXT));
+                } else {
+                    ui.label(egui::RichText::new("Open network — no password.")
+                        .size(13.0).color(SUBTEXT));
+                }
+            });
+
+        // Handle actions
+        if go_back {
+            self.info_ssid = None;
+        } else if do_forget {
+            let s  = ssid.to_string();
+            let st = Arc::clone(&self.status);
+            let ok = format!("Forgot {s}");
+            run_nmcli_bg(vec!["connection", "delete", "id"], vec![s.clone()], st, ok);
+            if self.selected_ssid.as_deref() == Some(ssid) { self.selected_ssid = None; }
+            self.info_ssid = None;
+            scan(Arc::clone(&self.networks), Arc::clone(&self.scanning), Arc::clone(&self.status));
+        } else if do_save {
+            let s  = ssid.to_string();
+            let pw = self.info_password.clone();
+            let st = Arc::clone(&self.status);
+            let ok = format!("Password updated for {s}");
+            run_nmcli_bg(
+                vec!["connection", "modify", "id"],
+                vec![s, String::from("wifi-sec.psk"), pw],
+                st, ok,
+            );
+            self.info_ssid = None;
+        }
+    }
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Wi-Fi")
-            .with_inner_size([380.0, 480.0])
-            .with_resizable(true),
+            .with_app_id("wifi-gui")
+            .with_inner_size([360.0, 500.0])
+            .with_min_inner_size([360.0, 500.0])
+            .with_max_inner_size([360.0, 500.0])
+            .with_decorations(false)
+            .with_resizable(false),
         ..Default::default()
     };
 
     let app = WifiApp::default();
-    scan(
-        Arc::clone(&app.networks),
-        Arc::clone(&app.scanning),
-        Arc::clone(&app.status),
-    );
-
+    scan(Arc::clone(&app.networks), Arc::clone(&app.scanning), Arc::clone(&app.status));
     eframe::run_native("Wi-Fi", options, Box::new(|_cc| Ok(Box::new(app))))
 }
