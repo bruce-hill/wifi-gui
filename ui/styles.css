@@ -95,7 +95,7 @@ html, body {
   overflow-y: auto;
 }
 .content.pad { padding: 22px 20px 8px; }
-.content.list { background: var(--list-bg); }
+.content.list { background: var(--win-bg); padding: 10px; }
 
 /* ── Panels (header / footer) ─────────────────────────────────────────────── */
 .panel {
@@ -137,7 +137,6 @@ html, body {
 .btn.neutral:hover { background-color: rgb(210, 207, 202); }
 .btn.connect { background-color: var(--btn-conn); border-color: color-mix(in srgb, var(--btn-conn) 100%, black 12%); min-width: 85px; }
 .btn.disconnect { background-color: var(--btn-disc); border-color: color-mix(in srgb, var(--btn-disc) 100%, black 12%); min-width: 95px; }
-.btn.info { background-color: var(--btn-info); border-color: color-mix(in srgb, var(--btn-info) 100%, black 12%); min-width: 52px; }
 .btn.forget { background-color: var(--btn-disc); border-color: color-mix(in srgb, var(--btn-disc) 100%, black 12%); min-width: 68px; }
 .btn.save { background-color: var(--btn-conn); border-color: color-mix(in srgb, var(--btn-conn) 100%, black 12%); min-width: 108px; }
 .btn:disabled {
@@ -195,14 +194,18 @@ html, body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Network list rows ────────────────────────────────────────────────────── */
+.list-card { margin-top: 0; }
+.other-card { margin-top: 10px; }
+
 .row {
   display: flex;
   align-items: center;
   height: 50px;
   padding: 0 12px;
-  border-bottom: 1px solid var(--sep);
   cursor: pointer;
+  transition: background 0.1s;
 }
+.row + .row { border-top: 1px solid var(--sep); }
 .row:hover { background: var(--row-hov); }
 .row.in-use { background: var(--row-conn); }
 .row.in-use:hover { background: var(--row-hov); }
@@ -256,17 +259,32 @@ html, body {
 .row.other { height: 42px; }
 .row.other .ssid { font-size: 12.5px; }
 
+.icon.chev .stroke { stroke: var(--bar-dim); }
+.row:hover .icon.chev .stroke { stroke: var(--subtext); }
+.row.selected .icon.chev .stroke { stroke: rgba(255, 255, 255, 0.85); }
+
 .empty {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   height: 100%;
   color: var(--subtext);
 }
+.empty svg { color: var(--bar-dim); }
 
 /* ── Password / info views ────────────────────────────────────────────────── */
 h2 { font-size: 15px; font-weight: 600; }
-#info-ssid { font-size: 16px; }
+#info-ssid {
+  font-size: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.info-head { display: flex; align-items: center; gap: 12px; }
+.info-head .info-head-text { flex: 1; min-width: 0; }
 p.sub { font-size: 12px; color: var(--subtext); margin-top: 4px; }
 p.sub.connected { color: var(--success); }
 p.sub.connected::before {
@@ -395,6 +413,17 @@ label.check {
 .icon-btn:active { background: rgba(0, 0, 0, 0.14); }
 .icon-btn.done { opacity: 1; color: var(--success); }
 .icon-btn svg { display: block; }
+
+/* Header scan button */
+.icon-btn.header-btn {
+  width: 26px;
+  height: 26px;
+  opacity: 0.75;
+  color: var(--text);
+}
+.icon-btn.header-btn:hover { opacity: 1; }
+.icon-btn.header-btn:disabled { background: transparent; cursor: default; }
+.icon-btn.spinning svg { animation: spin 0.9s linear infinite; }
 
 /* Inline (borderless) password field inside a card row */
 .irow input.pw {

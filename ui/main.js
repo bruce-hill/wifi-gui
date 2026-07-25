@@ -11,6 +11,7 @@ let status       = "";
 let statusError  = false;
 let statusTimer  = null;
 let info         = null;   // InfoState when the info view is open
+let infoNet      = null;   // the Network the info view was opened for
 let connectingTo = null;   // SSID when the password view is open
 let hiddenJoin   = false;  // password view is in join-hidden-network mode
 let forgetArmed  = false;
@@ -55,21 +56,31 @@ const LOCK_SVG = `<span class="icon lock"><svg width="12" height="14" viewBox="0
   <path class="stroke" d="M3.5 6 V4 a2.5 2.5 0 0 1 5 0 V6" fill="none" stroke-width="1.4"/>
   <rect class="fill" x="2" y="6" width="8" height="6" rx="1"/></svg></span>`;
 
+const WIFI_EMPTY_SVG = `<svg width="38" height="31" viewBox="0 0 24 20" fill="none"
+    stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+  <path d="M2.4 6.8 a14 14 0 0 1 19.2 0"/>
+  <path d="M5.6 10.6 a9.3 9.3 0 0 1 12.8 0"/>
+  <path d="M8.8 14.3 a4.8 4.8 0 0 1 6.4 0"/>
+  <circle cx="12" cy="17.4" r="1.5" fill="currentColor" stroke="none"/></svg>`;
+const CHEV_SVG = `<span class="icon chev"><svg width="7" height="12" viewBox="0 0 7 12">
+  <path class="stroke" d="M1 1 L6 6 L1 11" fill="none" stroke-width="1.6"
+        stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+
 function renderList() {
   const list = $("network-list");
   if (!wifiEnabled) {
-    list.innerHTML = '<div class="empty">Wi-Fi is turned off</div>';
+    list.innerHTML = `<div class="empty">${WIFI_EMPTY_SVG}<div>Wi-Fi is turned off</div></div>`;
     return;
   }
   if (networks.length === 0) {
-    list.innerHTML = `<div class="empty">${
-      scanning ? "Scanning for networks…" : "No networks found — click Scan"}</div>`;
+    list.innerHTML = `<div class="empty">${WIFI_EMPTY_SVG}<div>${
+      scanning ? "Scanning for networks…" : "No networks found"}</div></div>`;
     return;
   }
   list.innerHTML = "";
+  const card = el("div", "info-card list-card");
   for (const net of networks) {
-    const row = document.createElement("div");
-    row.className = "row";
+    const row = el("div", "row");
     if (net.inUse) row.classList.add("in-use");
     if (net.ssid === selectedSsid) row.classList.add("selected");
     const sub = net.inUse ? "Connected"
@@ -78,19 +89,24 @@ function renderList() {
     const icon = net.inUse ? CHECK_SVG : net.secured ? LOCK_SVG : "";
     row.title = `Signal: ${net.signal}%`;
     row.innerHTML = `${barsFor(net.signal)}
-      <span class="labels"><div class="ssid"></div><div class="sub">${sub}</div></span>${icon}`;
+      <span class="labels"><div class="ssid"></div><div class="sub">${sub}</div></span>${icon}${CHEV_SVG}`;
     row.querySelector(".ssid").textContent = net.ssid;
-    row.addEventListener("click", () => { selectedSsid = net.ssid; renderList(); renderChrome(); });
-    row.addEventListener("dblclick", () => primaryAction(net));
-    list.appendChild(row);
+    row.addEventListener("click", () => {
+      if (busy) return;
+      selectedSsid = net.ssid;
+      openInfoView(net);
+    });
+    card.appendChild(row);
   }
+  list.appendChild(card);
 
-  const other = document.createElement("div");
-  other.className = "row other";
+  const otherCard = el("div", "info-card other-card");
+  const other = el("div", "row other");
   other.innerHTML = `<span class="labels"><div class="ssid">Other network…</div>
     <div class="sub">Join a hidden network by name</div></span>`;
   other.addEventListener("click", () => { if (!busy) openPasswordView(null, true); });
-  list.appendChild(other);
+  otherCard.appendChild(other);
+  list.appendChild(otherCard);
 }
 
 function renderChrome() {
@@ -108,27 +124,16 @@ function renderChrome() {
     cs.classList.remove("connected");
   }
   $("wifi-toggle").checked = wifiEnabled;
-  $("scan-btn").classList.toggle("hidden", !wifiEnabled || scanning);
-  $("scan-btn").disabled = busy;
-  $("scan-spinner").classList.toggle("hidden", !wifiEnabled || !scanning);
+  const scanBtn = $("scan-btn");
+  scanBtn.classList.toggle("hidden", !wifiEnabled);
+  scanBtn.classList.toggle("spinning", scanning);
+  scanBtn.disabled = scanning || busy;
+  scanBtn.title = scanning ? "Scanning…" : "Scan for networks";
 
   // Footer
   const st = $("status-text");
   st.textContent = status || (scanning ? "Scanning for networks…" : "");
   st.classList.toggle("error", statusError && !!status);
-  const sel = networks.find((n) => n.ssid === selectedSsid);
-  const action = $("action-btn");
-  if (sel && sel.inUse) {
-    action.textContent = "Disconnect";
-    action.className = "btn disconnect";
-    action.disabled = busy;
-  } else {
-    action.textContent = "Connect";
-    action.className = "btn connect";
-    action.disabled = busy || !sel;
-  }
-  $("info-btn").classList.toggle("hidden", !sel);
-  $("info-btn").disabled = busy;
 }
 
 function render() {
@@ -155,40 +160,6 @@ async function doScan() {
   }
   scanning = false;
   render();
-}
-
-// Run a connect/disconnect-style action with busy state and status feedback.
-async function runAction(progress, done, fn) {
-  busy = true;
-  setStatus(progress, { sticky: true });
-  renderChrome();
-  try {
-    await fn();
-    setStatus(done);
-  } catch (e) {
-    setStatus(String(e), { error: true, sticky: true });
-  }
-  busy = false;
-  await refreshQuick();
-}
-
-const doConnectSaved = (ssid) =>
-  runAction(`Connecting to ${ssid}…`, `Connected to ${ssid}`,
-            () => invoke("connect_saved", { ssid }));
-const doConnectOpen = (ssid) =>
-  runAction(`Connecting to ${ssid}…`, `Connected to ${ssid}`,
-            () => invoke("connect", { ssid, password: null }));
-const doDisconnect = (ssid) =>
-  runAction(`Disconnecting from ${ssid}…`, `Disconnected from ${ssid}`,
-            () => invoke("disconnect", { ssid }));
-
-// Connect / Disconnect / prompt-for-password, depending on the network.
-function primaryAction(net) {
-  if (busy) return;
-  if (net.inUse) doDisconnect(net.ssid);
-  else if (net.known) doConnectSaved(net.ssid);
-  else if (net.secured) openPasswordView(net.ssid, false);
-  else doConnectOpen(net.ssid);
 }
 
 // ── Password view ─────────────────────────────────────────────────────────────
@@ -334,12 +305,19 @@ const val = (text) => el("span", "ival", text);
 async function openInfoView(net) {
   info = await invoke("fetch_info", { ssid: net.ssid, inUse: net.inUse });
   info.secured = net.secured;
+  infoNet = net;
 
   $("info-ssid").textContent = info.ssid;
   const ic = $("info-conn");
   ic.textContent = net.inUse ? "Currently connected" : "Not connected";
   ic.classList.toggle("connected", net.inUse);
   $("info-status").textContent = "";
+  $("info-status").classList.remove("error");
+
+  const act = $("info-action");
+  act.textContent = net.inUse ? "Disconnect" : "Connect";
+  act.className = net.inUse ? "btn disconnect" : "btn connect";
+  act.disabled = false;
 
   const body = $("info-body");
   body.innerHTML = "";
@@ -428,9 +406,41 @@ async function openInfoView(net) {
 
 function closeInfoView() {
   info = null;
+  infoNet = null;
   clearTimeout(forgetTimer);
   forgetArmed = false;
   showView("list");
+}
+
+function setInfoBusy(b, msg = "") {
+  busy = b;
+  for (const id of ["info-action", "info-back", "info-forget", "info-save"]) {
+    $(id).disabled = b;
+  }
+  const s = $("info-status");
+  s.classList.remove("error");
+  s.textContent = msg;
+}
+
+// Run connect/disconnect from the info view, then re-render it with fresh state.
+async function infoRun(ssid, progress, fn) {
+  setInfoBusy(true, progress);
+  let err = "";
+  try { await fn(); } catch (e) { err = String(e); }
+  busy = false;
+  await refreshQuick();
+  if (currentView() !== "info" || !info || info.ssid !== ssid) return;
+  const net = networks.find((n) => n.ssid === ssid);
+  if (net) {
+    await openInfoView(net);
+    if (err) {
+      $("info-status").textContent = err;
+      $("info-status").classList.add("error");
+    }
+  } else {
+    closeInfoView();
+    if (err) setStatus(err, { error: true, sticky: true });
+  }
 }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
@@ -460,16 +470,6 @@ $("wifi-toggle").addEventListener("change", async (e) => {
   }
 });
 
-$("action-btn").addEventListener("click", () => {
-  const sel = networks.find((n) => n.ssid === selectedSsid);
-  if (sel) primaryAction(sel);
-});
-
-$("info-btn").addEventListener("click", () => {
-  const sel = networks.find((n) => n.ssid === selectedSsid);
-  if (sel) openInfoView(sel);
-});
-
 $("pw-cancel").addEventListener("click", () => {
   if (busy) return;
   connectingTo = null;
@@ -489,6 +489,21 @@ $("pw-show").addEventListener("change", (e) => {
 });
 
 $("info-back").addEventListener("click", closeInfoView);
+
+$("info-action").addEventListener("click", () => {
+  if (busy || !info) return;
+  const ssid = info.ssid;
+  const net = networks.find((n) => n.ssid === ssid) || infoNet;
+  if (net.inUse) {
+    infoRun(ssid, `Disconnecting…`, () => invoke("disconnect", { ssid }));
+  } else if (info.hasProfile) {
+    infoRun(ssid, `Connecting…`, () => invoke("connect_saved", { ssid }));
+  } else if (net.secured) {
+    openPasswordView(ssid, false);
+  } else {
+    infoRun(ssid, `Connecting…`, () => invoke("connect", { ssid, password: null }));
+  }
+});
 
 $("info-forget").addEventListener("click", async () => {
   // Two-step confirm: first click arms, second click within 3s executes.
@@ -543,9 +558,9 @@ document.addEventListener("keydown", (e) => {
       renderList();
       renderChrome();
       document.querySelector("#network-list .row.selected")?.scrollIntoView({ block: "nearest" });
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" || e.key === "ArrowRight") {
       const sel = networks.find((n) => n.ssid === selectedSsid);
-      if (sel) primaryAction(sel);
+      if (sel && !busy) openInfoView(sel);
     } else if (e.key === "Escape") {
       appWindow.close();
     }
@@ -555,7 +570,7 @@ document.addEventListener("keydown", (e) => {
       showView("list");
     }
   } else if (view === "info") {
-    if (e.key === "Escape") closeInfoView();
+    if (e.key === "Escape" || e.key === "ArrowLeft") closeInfoView();
   }
 });
 

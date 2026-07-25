@@ -22,8 +22,13 @@
     <div class="panel header">
       <span id="conn-status"></span>
       <span class="spacer"></span>
-      <div id="scan-spinner" class="spinner hidden"></div>
-      <button id="scan-btn" class="btn neutral">Scan</button>
+      <button id="scan-btn" class="icon-btn header-btn" title="Scan for networks">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"></polyline>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+        </svg>
+      </button>
       <label class="toggle">
         <input type="checkbox" id="wifi-toggle" />
         <span class="knob"></span>
@@ -35,8 +40,6 @@
     <div class="panel footer">
       <span id="status-text" class="status"></span>
       <span class="spacer"></span>
-      <button id="info-btn" class="btn info hidden">Info</button>
-      <button id="action-btn" class="btn connect" disabled>Connect</button>
     </div>
   </div>
 
@@ -61,11 +64,16 @@
   <!-- ── Info view ─────────────────────────────────────────────────── -->
   <div id="view-info" class="view hidden">
     <div class="content pad">
-      <h2 id="info-ssid"></h2>
-      <p id="info-conn" class="sub"></p>
+      <div class="info-head">
+        <div class="info-head-text">
+          <h2 id="info-ssid"></h2>
+          <p id="info-conn" class="sub"></p>
+        </div>
+        <button id="info-action" class="btn connect">Connect</button>
+      </div>
       <div id="info-body"></div>
       <p id="info-noprofile" class="sub hidden">No saved profile for this network.</p>
-      <p id="info-status" class="status error"></p>
+      <p id="info-status" class="status"></p>
     </div>
     <div class="panel footer">
       <button id="info-back" class="btn neutral">Back</button>
