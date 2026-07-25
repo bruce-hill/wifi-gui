@@ -28,7 +28,6 @@
   --btn-face:   rgb(224, 221, 216);
   --btn-conn:   rgb(13, 105, 213);
   --btn-disc:   rgb(175, 38, 22);
-  --btn-info:   rgb(96, 93, 88);
   --btn-dis-bg: rgb(200, 197, 192);
   --btn-dis-fg: rgb(142, 139, 134);
 }
@@ -263,6 +262,26 @@ html, body {
 .row:hover .icon.chev .stroke { stroke: var(--subtext); }
 .row.selected .icon.chev .stroke { stroke: rgba(255, 255, 255, 0.85); }
 
+/* ── VPN card (pinned above the list) ─────────────────────────────────────── */
+.vpn-wrap { padding: 10px 10px 0; background: var(--win-bg); }
+.vpn-wrap .info-card { margin-top: 0; }
+
+.row.vpn-row { height: 44px; cursor: default; }
+.row.vpn-row:hover { background: transparent; }
+.row.vpn-row.in-use, .row.vpn-row.in-use:hover { background: var(--row-conn); }
+
+.vpn-icon {
+  display: flex;
+  justify-content: center;
+  width: 28px;
+  margin-right: 12px;
+  flex-shrink: 0;
+  color: var(--bar-dim);
+}
+.row.vpn-row.in-use .vpn-icon { color: var(--conn-text); }
+
+.row.vpn-row .spinner { margin-right: 8px; }
+
 .empty {
   display: flex;
   flex-direction: column;
@@ -276,15 +295,15 @@ html, body {
 
 /* ── Password / info views ────────────────────────────────────────────────── */
 h2 { font-size: 15px; font-weight: 600; }
-#info-ssid {
+
+.info-head { display: flex; align-items: center; gap: 12px; }
+.info-head .info-head-text { flex: 1; min-width: 0; }
+.info-head h2 {
   font-size: 16px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-.info-head { display: flex; align-items: center; gap: 12px; }
-.info-head .info-head-text { flex: 1; min-width: 0; }
 p.sub { font-size: 12px; color: var(--subtext); margin-top: 4px; }
 p.sub.connected { color: var(--success); }
 p.sub.connected::before {
@@ -309,20 +328,6 @@ input[type="password"], input[type="text"] {
   cursor: text;
 }
 input:focus { outline: 2px solid var(--sel-bg); outline-offset: -1px; }
-
-#pw-ssid { margin-top: 14px; }
-#pw-input { margin-top: 12px; }
-
-
-label.check {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--subtext);
-  cursor: pointer;
-}
 
 #pw-status { margin-top: 10px; }
 

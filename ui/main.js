@@ -14,8 +14,11 @@ let info         = null;   // InfoState when the info view is open
 let infoNet      = null;   // the Network the info view was opened for
 let connectingTo = null;   // SSID when the password view is open
 let hiddenJoin   = false;  // password view is in join-hidden-network mode
+let pwReturnNet  = null;   // reopen this network's info page when leaving the password view
 let forgetArmed  = false;
 let forgetTimer  = null;
+let wgStatus     = null;   // {installed, up, interface} — null until first check
+let wgBusy       = false;  // a wg-quick up/down is in flight
 
 const $ = (id) => document.getElementById(id);
 
@@ -136,9 +139,24 @@ function renderChrome() {
   st.classList.toggle("error", statusError && !!status);
 }
 
+function renderVpn() {
+  const bar = $("vpn-bar");
+  const show = !!(wgStatus && wgStatus.installed);
+  bar.classList.toggle("hidden", !show);
+  if (!show) return;
+  $("vpn-row").classList.toggle("in-use", wgStatus.up);
+  $("vpn-sub").textContent = wgBusy ? (($("vpn-toggle").checked) ? "Starting…" : "Stopping…")
+                           : wgStatus.up ? `Active: ${wgStatus.interface}`
+                           : "Inactive";
+  if (!wgBusy) $("vpn-toggle").checked = wgStatus.up;
+  $("vpn-toggle").disabled = wgBusy;
+  $("vpn-spinner").classList.toggle("hidden", !wgBusy);
+}
+
 function render() {
   renderList();
   renderChrome();
+  renderVpn();
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -162,24 +180,42 @@ async function doScan() {
   render();
 }
 
+async function refreshWireguard() {
+  try {
+    wgStatus = await invoke("wireguard_status");
+  } catch (_) { /* keep the old status */ }
+  renderVpn();
+}
+
 // ── Password view ─────────────────────────────────────────────────────────────
 function openPasswordView(ssid, hidden) {
   connectingTo = ssid;
   hiddenJoin = hidden;
-  $("pw-title").textContent = hidden ? "Join hidden network" : `Connect to “${ssid}”`;
+  pwReturnNet = hidden ? null : infoNet;
+  $("pw-title").textContent = hidden ? "Join hidden network" : ssid;
   $("pw-sub").textContent = hidden
-    ? "Enter the network name and password (leave the password blank for open networks):"
-    : "Enter the network password:";
-  $("pw-ssid").classList.toggle("hidden", !hidden);
+    ? "Leave the password blank for open networks"
+    : "Enter the password to connect";
+  $("pw-ssid-row").classList.toggle("hidden", !hidden);
   $("pw-ssid").value = "";
   $("pw-input").value = "";
   $("pw-input").type = "password";
-  $("pw-show").checked = false;
+  $("pw-eye").innerHTML = EYE_SVG;
+  $("pw-eye").title = "Show password";
   $("pw-status").textContent = "";
   $("pw-status").classList.remove("error");
   setPwBusy(false);
   showView("password");
   (hidden ? $("pw-ssid") : $("pw-input")).focus();
+}
+
+function cancelPasswordView() {
+  if (busy) return;
+  connectingTo = null;
+  const ret = pwReturnNet;
+  pwReturnNet = null;
+  if (ret) openInfoView(ret);
+  else showView("list");
 }
 
 function setPwBusy(b, msg = "") {
@@ -188,6 +224,7 @@ function setPwBusy(b, msg = "") {
   $("pw-cancel").disabled = b;
   $("pw-ssid").disabled = b;
   $("pw-input").disabled = b;
+  $("pw-eye").disabled = b;
   $("pw-status").textContent = msg;
   $("pw-status").classList.remove("error");
   updatePwButton();
@@ -214,9 +251,14 @@ async function submitPassword() {
     }
     busy = false;
     connectingTo = null;
-    showView("list");
     setStatus(`Connected to ${ssid}`);
-    refreshQuick();
+    await refreshQuick();
+    // Return to the info page we came from, now showing the connected state.
+    const ret = pwReturnNet;
+    pwReturnNet = null;
+    const net = ret && networks.find((n) => n.ssid === ssid);
+    if (net) await openInfoView(net);
+    else showView("list");
   } catch (e) {
     // A failed attempt leaves behind a broken profile with the bad password;
     // clean it up so the network doesn't show as "Saved". (Safe: this view is
@@ -470,13 +512,32 @@ $("wifi-toggle").addEventListener("change", async (e) => {
   }
 });
 
-$("pw-cancel").addEventListener("click", () => {
-  if (busy) return;
-  connectingTo = null;
-  showView("list");
+$("vpn-toggle").addEventListener("change", async (e) => {
+  if (!wgStatus || wgBusy) return;
+  const up = e.target.checked;
+  const iface = wgStatus.interface;
+  wgBusy = true;
+  renderVpn();
+  try {
+    await invoke("set_wireguard", { up, interface: iface });
+    setStatus(up ? `WireGuard ${iface} is up` : `WireGuard ${iface} is down`);
+  } catch (err) {
+    setStatus(String(err), { error: true, sticky: true });
+  }
+  wgBusy = false;
+  await refreshWireguard();  // re-syncs the toggle with reality (reverts on failure)
 });
+
+$("pw-cancel").addEventListener("click", cancelPasswordView);
 $("pw-connect").addEventListener("click", submitPassword);
-$("pw-input").addEventListener("input", updatePwButton);
+$("pw-input").addEventListener("input", () => {
+  // Editing clears stale errors; a too-short passphrase explains the disabled button.
+  const s = $("pw-status");
+  s.classList.remove("error");
+  const len = $("pw-input").value.length;
+  s.textContent = len > 0 && len < 8 ? "Wi-Fi passwords are at least 8 characters" : "";
+  updatePwButton();
+});
 $("pw-ssid").addEventListener("input", updatePwButton);
 $("pw-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") submitPassword();
@@ -484,8 +545,13 @@ $("pw-input").addEventListener("keydown", (e) => {
 $("pw-ssid").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("pw-input").focus();
 });
-$("pw-show").addEventListener("change", (e) => {
-  $("pw-input").type = e.target.checked ? "text" : "password";
+$("pw-eye").innerHTML = EYE_SVG;
+$("pw-eye").addEventListener("click", () => {
+  const input = $("pw-input");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  $("pw-eye").innerHTML = show ? EYE_OFF_SVG : EYE_SVG;
+  $("pw-eye").title = show ? "Hide password" : "Show password";
 });
 
 $("info-back").addEventListener("click", closeInfoView);
@@ -565,10 +631,7 @@ document.addEventListener("keydown", (e) => {
       appWindow.close();
     }
   } else if (view === "password") {
-    if (e.key === "Escape" && !busy) {
-      connectingTo = null;
-      showView("list");
-    }
+    if (e.key === "Escape") cancelPasswordView();
   } else if (view === "info") {
     if (e.key === "Escape" || e.key === "ArrowLeft") closeInfoView();
   }
@@ -578,6 +641,7 @@ document.addEventListener("keydown", (e) => {
 (async () => {
   wifiEnabled = await invoke("get_wifi_enabled");
   render();
+  refreshWireguard();
   if (wifiEnabled) {
     await refreshQuick();
     doScan();
@@ -587,5 +651,7 @@ document.addEventListener("keydown", (e) => {
 // Keep the list and signal strengths fresh while idle (no active rescan —
 // this just re-reads NetworkManager's scan cache, which it refreshes itself).
 setInterval(() => {
-  if (currentView() === "list" && wifiEnabled && !scanning && !busy) refreshQuick();
+  if (currentView() !== "list" || busy) return;
+  if (wifiEnabled && !scanning) refreshQuick();
+  if (!wgBusy) refreshWireguard();
 }, 15000);

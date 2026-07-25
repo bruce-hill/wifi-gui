@@ -16,6 +16,14 @@ struct Network {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WireguardStatus {
+    installed: bool,
+    up:        bool,
+    interface: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InfoState {
     ssid:        String,
     has_profile: bool,
@@ -272,6 +280,94 @@ async fn fetch_info(ssid: String, in_use: bool) -> InfoState {
     s
 }
 
+// ── WireGuard ─────────────────────────────────────────────────────────────────
+// First WireGuard-type NetworkManager profile, if any: (name, currently active).
+// Preferred over wg-quick — NM needs no root and applies DNS itself instead of
+// going through resolvconf.
+fn nm_wg_profile() -> Option<(String, bool)> {
+    let out = nmcli(&["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show"]).ok()?;
+    for line in out.lines() {
+        let p = split_nmcli(line, 3);
+        if p.len() == 3 && p[1] == "wireguard" {
+            return Some((p[0].clone(), !p[2].is_empty()));
+        }
+    }
+    None
+}
+
+// The interface a fresh `up` should bring up; active interfaces are detected.
+fn wg_default_iface() -> String {
+    std::env::var("WIFI_GUI_WG_IFACE").unwrap_or_else(|_| "wg0".into())
+}
+
+// First active WireGuard interface, via `ip link` (works unprivileged, unlike
+// `wg show` or reading /etc/wireguard). Lines look like "9: wg0: <UP,...>".
+fn active_wg_iface() -> Option<String> {
+    let out = Command::new("ip")
+        .args(["-o", "link", "show", "type", "wireguard"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|line| {
+        let name = line.split(':').nth(1)?.trim();
+        let name = name.split('@').next().unwrap_or(name);
+        (!name.is_empty()).then(|| name.to_string())
+    })
+}
+
+#[tauri::command]
+async fn wireguard_status() -> WireguardStatus {
+    if let Some((name, active)) = nm_wg_profile() {
+        return WireguardStatus { installed: true, up: active, interface: name };
+    }
+    let installed = Command::new("which")
+        .arg("wg-quick")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    match active_wg_iface() {
+        Some(iface) => WireguardStatus { installed, up: true, interface: iface },
+        None => WireguardStatus { installed, up: false, interface: wg_default_iface() },
+    }
+}
+
+// wg-quick needs root: try passwordless doas/sudo first (non-interactive, so
+// they fail fast if a password would be needed), then fall back to pkexec.
+// --disable-internal-agent stops pkexec from prompting on the controlling
+// terminal when no graphical polkit agent is around; it errors out instead.
+#[tauri::command]
+async fn set_wireguard(up: bool, interface: String) -> Result<(), String> {
+    let action = if up { "up" } else { "down" };
+    // An NM-managed profile needs no privilege escalation at all.
+    if let Some((name, _)) = nm_wg_profile() {
+        if name == interface {
+            return nmcli(&["connection", action, "id", &name]).map(|_| ());
+        }
+    }
+    let mut errs: Vec<String> = Vec::new();
+    for runner in [&["doas", "-n"][..], &["sudo", "-n"], &["pkexec", "--disable-internal-agent"]] {
+        let out = Command::new(runner[0])
+            .args(&runner[1..])
+            .args(["wg-quick", action, &interface])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => return Ok(()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                errs.push(if err.is_empty() {
+                    format!("{}: {}", runner[0], o.status)
+                } else {
+                    err
+                });
+            }
+            Err(e) => errs.push(format!("{}: {e}", runner[0])),
+        }
+    }
+    Err(errs.join(" · "))
+}
+
 // ── UI scale ──────────────────────────────────────────────────────────────────
 // WebKitGTK only honors integer GTK scale factors, unlike winit (used by the
 // old egui build), which derives a fractional scale from the monitor's
@@ -327,6 +423,8 @@ fn main() {
             forget,
             save_password,
             fetch_info,
+            wireguard_status,
+            set_wireguard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

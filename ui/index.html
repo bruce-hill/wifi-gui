@@ -35,6 +35,28 @@
       </label>
     </div>
 
+    <div id="vpn-bar" class="vpn-wrap hidden">
+      <div class="info-card">
+        <div id="vpn-row" class="row vpn-row">
+          <span class="vpn-icon">
+            <svg width="15" height="17" viewBox="0 0 15 17" fill="none"
+                 stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+              <path d="M7.5 1.3 L13.3 3.5 V7.8 c0 3.9-2.6 6.5-5.8 7.7 C4.5 14.3 1.7 11.7 1.7 7.8 V3.5 Z"/>
+            </svg>
+          </span>
+          <span class="labels">
+            <div class="ssid">WireGuard</div>
+            <div class="sub" id="vpn-sub"></div>
+          </span>
+          <div id="vpn-spinner" class="spinner hidden"></div>
+          <label class="toggle small">
+            <input type="checkbox" id="vpn-toggle" />
+            <span class="knob"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+
     <div id="network-list" class="content list"></div>
 
     <div class="panel footer">
@@ -46,11 +68,23 @@
   <!-- ── Password entry view ───────────────────────────────────────── -->
   <div id="view-password" class="view hidden">
     <div class="content pad">
-      <h2 id="pw-title"></h2>
-      <p id="pw-sub" class="sub"></p>
-      <input type="text" id="pw-ssid" placeholder="Network name (SSID)" autocomplete="off" class="hidden" />
-      <input type="password" id="pw-input" placeholder="Password" autocomplete="off" />
-      <label class="check"><input type="checkbox" id="pw-show" /> Show password</label>
+      <div class="info-head">
+        <div class="info-head-text">
+          <h2 id="pw-title"></h2>
+          <p id="pw-sub" class="sub"></p>
+        </div>
+      </div>
+      <div class="info-card">
+        <div class="irow hidden" id="pw-ssid-row">
+          <span class="ilabel">Network</span>
+          <input type="text" id="pw-ssid" class="pw" placeholder="Network name" autocomplete="off" />
+        </div>
+        <div class="irow">
+          <span class="ilabel">Password</span>
+          <input type="password" id="pw-input" class="pw" placeholder="Enter password" autocomplete="off" />
+          <button id="pw-eye" class="icon-btn" title="Show password"></button>
+        </div>
+      </div>
       <p id="pw-status" class="status"></p>
     </div>
     <div class="panel footer">
