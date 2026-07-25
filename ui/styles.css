@@ -119,6 +119,7 @@ html, body {
 }
 
 .status { font-size: 11px; color: var(--subtext); }
+.status.error { color: var(--btn-disc); }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 .btn {
@@ -252,6 +253,9 @@ html, body {
 .row.selected .icon .stroke { stroke: white; }
 .row.selected .icon .fill { fill: white; }
 
+.row.other { height: 42px; }
+.row.other .ssid { font-size: 12.5px; }
+
 .empty {
   display: flex;
   align-items: center;
@@ -288,7 +292,9 @@ input[type="password"], input[type="text"] {
 }
 input:focus { outline: 2px solid var(--sel-bg); outline-offset: -1px; }
 
-#pw-input { margin-top: 14px; }
+#pw-ssid { margin-top: 14px; }
+#pw-input { margin-top: 12px; }
+
 
 label.check {
   display: flex;
@@ -302,17 +308,116 @@ label.check {
 
 #pw-status { margin-top: 10px; }
 
-/* ── Info grid ────────────────────────────────────────────────────────────── */
-#info-grid {
-  margin-top: 10px;
-  border-spacing: 0 5px;
-  font-size: 12px;
-}
-#info-grid td { vertical-align: middle; }
-#info-grid td:first-child {
-  min-width: 76px;
-  padding-right: 12px;
+/* ── Info view cards ──────────────────────────────────────────────────────── */
+.info-sec {
+  margin: 14px 2px 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--subtext);
-  white-space: nowrap;
 }
-#info-grid input { font-size: 12px; min-width: 180px; }
+.info-card {
+  margin-top: 10px;
+  background: var(--list-bg);
+  border: 1px solid var(--sep);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.info-sec + .info-card { margin-top: 6px; }
+
+.irow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 2px 10px;
+  transition: background 0.1s;
+}
+.irow + .irow { border-top: 1px solid var(--sep); }
+.irow:hover { background: rgb(246, 250, 255); }
+.irow:focus-within { background: var(--row-hov); }
+
+.ilabel {
+  width: 84px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--subtext);
+}
+.ival {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+  cursor: text;
+}
+.ival.sigval {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  user-select: none;
+  cursor: default;
+}
+
+.irow .bars { display: flex; align-items: flex-end; gap: 2px; }
+.irow .bars i { width: 3.5px; border-radius: 1px; background: var(--bar-dim); }
+.irow .bars i:nth-child(1) { height: 4px; }
+.irow .bars i:nth-child(2) { height: 7px; }
+.irow .bars i:nth-child(3) { height: 10px; }
+.irow .bars i:nth-child(4) { height: 13px; }
+.irow .bars i.on { background: rgb(64, 64, 64); }
+
+/* Small icon buttons (copy / show-password) — fade in on row hover */
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--subtext);
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.irow:hover .icon-btn, .icon-btn:focus-visible { opacity: 1; }
+.icon-btn:hover { background: rgba(0, 0, 0, 0.08); color: var(--text); }
+.icon-btn:active { background: rgba(0, 0, 0, 0.14); }
+.icon-btn.done { opacity: 1; color: var(--success); }
+.icon-btn svg { display: block; }
+
+/* Inline (borderless) password field inside a card row */
+.irow input.pw {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 12.5px;
+  font-family: inherit;
+  text-align: right;
+  color: var(--text);
+  user-select: text;
+  cursor: text;
+}
+.irow input.pw:focus { outline: none; }
+.irow input.pw::placeholder { color: var(--bar-dim); }
+
+/* Compact toggle for card rows */
+.toggle.small { width: 32px; height: 19px; margin-left: 0; }
+.toggle.small .knob::after { width: 14px; height: 14px; top: 2.5px; left: 2.5px; }
+.toggle.small input:checked + .knob::after { transform: translateX(13px); }
+
+#info-noprofile { margin-top: 14px; }
+#info-status { margin-top: 8px; }

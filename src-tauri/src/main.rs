@@ -11,6 +11,7 @@ struct Network {
     signal:  u8,
     secured: bool,
     in_use:  bool,
+    known:   bool,
 }
 
 #[derive(Serialize)]
@@ -23,6 +24,7 @@ struct InfoState {
     bssid:       String,
     channel:     String,
     band:        String,
+    rate:        String,
     security:    String,
     ip4_address: String,
     ip4_gateway: String,
@@ -47,7 +49,22 @@ fn nmcli(args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn parse_networks(output: &str) -> Vec<Network> {
+// Names of saved Wi-Fi connection profiles (profile name == SSID for
+// profiles created by `nmcli device wifi connect`, which is all this app makes).
+fn saved_wifi_names() -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    if let Ok(out) = nmcli(&["-t", "-f", "NAME,TYPE", "connection", "show"]) {
+        for line in out.lines() {
+            let p = split_nmcli(line, 2);
+            if p.len() == 2 && p[1] == "802-11-wireless" {
+                names.insert(p[0].clone());
+            }
+        }
+    }
+    names
+}
+
+fn parse_networks(output: &str, saved: &std::collections::HashSet<String>) -> Vec<Network> {
     let mut networks: Vec<Network> = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.splitn(5, ':').collect();
@@ -61,7 +78,8 @@ fn parse_networks(output: &str) -> Vec<Network> {
             if in_use || signal > ex.signal { ex.signal = signal; ex.in_use = in_use; }
             continue;
         }
-        networks.push(Network { ssid, signal, secured, in_use });
+        let known = saved.contains(&ssid);
+        networks.push(Network { ssid, signal, secured, in_use, known });
     }
     networks.sort_by(|a, b| b.in_use.cmp(&a.in_use).then(b.signal.cmp(&a.signal)));
     networks
@@ -89,16 +107,18 @@ fn split_nmcli(line: &str, max_parts: usize) -> Vec<String> {
 // ── Commands ──────────────────────────────────────────────────────────────────
 #[tauri::command]
 async fn scan() -> Result<Vec<Network>, String> {
+    let saved = saved_wifi_names();
     nmcli(&["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
             "device", "wifi", "list", "--rescan", "yes"])
-        .map(|out| parse_networks(&out))
+        .map(|out| parse_networks(&out, &saved))
 }
 
 #[tauri::command]
 async fn quick_scan() -> Result<Vec<Network>, String> {
+    let saved = saved_wifi_names();
     nmcli(&["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
             "device", "wifi", "list", "--rescan", "no"])
-        .map(|out| parse_networks(&out))
+        .map(|out| parse_networks(&out, &saved))
 }
 
 #[tauri::command]
@@ -120,6 +140,28 @@ async fn connect(ssid: String, password: Option<String>) -> Result<(), String> {
         args.extend(["password", pw]);
     }
     nmcli(&args).map(|_| ())
+}
+
+// Bring up an existing saved profile (no password prompt needed).
+#[tauri::command]
+async fn connect_saved(ssid: String) -> Result<(), String> {
+    nmcli(&["connection", "up", "id", &ssid]).map(|_| ())
+}
+
+#[tauri::command]
+async fn connect_hidden(ssid: String, password: Option<String>) -> Result<(), String> {
+    let mut args = vec!["device", "wifi", "connect", ssid.as_str()];
+    if let Some(pw) = password.as_deref() {
+        args.extend(["password", pw]);
+    }
+    args.extend(["hidden", "yes"]);
+    nmcli(&args).map(|_| ())
+}
+
+#[tauri::command]
+async fn set_autoconnect(ssid: String, enabled: bool) -> Result<(), String> {
+    nmcli(&["connection", "modify", "id", &ssid, "connection.autoconnect",
+            if enabled { "yes" } else { "no" }]).map(|_| ())
 }
 
 #[tauri::command]
@@ -147,6 +189,7 @@ async fn fetch_info(ssid: String, in_use: bool) -> InfoState {
         bssid:       String::new(),
         channel:     String::new(),
         band:        String::new(),
+        rate:        String::new(),
         security:    String::new(),
         ip4_address: String::new(),
         ip4_gateway: String::new(),
@@ -177,16 +220,17 @@ async fn fetch_info(ssid: String, in_use: bool) -> InfoState {
         }
     }
 
-    // 2. Scan cache: BSSID, channel, band, security
-    if let Ok(out) = nmcli(&["-t", "-f", "SSID,BSSID,CHAN,FREQ,SECURITY",
+    // 2. Scan cache: BSSID, channel, band, rate, security
+    if let Ok(out) = nmcli(&["-t", "-f", "SSID,BSSID,CHAN,FREQ,RATE,SECURITY",
                              "device", "wifi", "list"]) {
         for line in out.lines() {
-            let p = split_nmcli(line, 5);
-            if p.len() < 5 || p[0].trim() != ssid { continue; }
+            let p = split_nmcli(line, 6);
+            if p.len() < 6 || p[0].trim() != ssid { continue; }
             let bssid = p[1].trim().to_string();
             let chan  = p[2].trim().to_string();
             let freq  = p[3].trim();
-            let sec   = p[4].trim();
+            let rate  = p[4].trim();
+            let sec   = p[5].trim();
             if bssid != "--" && !bssid.is_empty() { s.bssid = bssid; }
             if chan  != "--" && !chan.is_empty()  { s.channel = chan; }
             let mhz: u32 = freq.split_whitespace().next()
@@ -195,6 +239,7 @@ async fn fetch_info(ssid: String, in_use: bool) -> InfoState {
                      else if mhz >= 4900 { "5 GHz".into() }
                      else if mhz > 0    { "2.4 GHz".into() }
                      else { String::new() };
+            if rate != "--" && !rate.is_empty() { s.rate = rate.to_string(); }
             if !sec.is_empty() && sec != "--" {
                 s.security = sec.split_whitespace().collect::<Vec<_>>().join("/");
             }
@@ -275,6 +320,9 @@ fn main() {
             get_wifi_enabled,
             set_wifi_enabled,
             connect,
+            connect_saved,
+            connect_hidden,
+            set_autoconnect,
             disconnect,
             forget,
             save_password,
