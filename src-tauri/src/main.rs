@@ -1,0 +1,285 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use serde::Serialize;
+use std::process::Command;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Network {
+    ssid:    String,
+    signal:  u8,
+    secured: bool,
+    in_use:  bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InfoState {
+    ssid:        String,
+    has_profile: bool,
+    password:    String,
+    autoconnect: Option<bool>,
+    bssid:       String,
+    channel:     String,
+    band:        String,
+    security:    String,
+    ip4_address: String,
+    ip4_gateway: String,
+    ip4_dns:     String,
+}
+
+// ── nmcli helpers ─────────────────────────────────────────────────────────────
+fn nmcli(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("nmcli")
+        .args(args)
+        .output()
+        .map_err(|e| format!("nmcli: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err
+        })
+    }
+}
+
+fn parse_networks(output: &str) -> Vec<Network> {
+    let mut networks: Vec<Network> = Vec::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.splitn(5, ':').collect();
+        if parts.len() < 4 { continue; }
+        let in_use  = parts[0].trim() == "*";
+        let ssid    = parts[1].replace("\\:", ":").trim().to_string();
+        let signal: u8 = parts[2].trim().parse().unwrap_or(0);
+        let secured = { let s = parts[3].trim(); !s.is_empty() && s != "--" };
+        if ssid.is_empty() || ssid == "--" { continue; }
+        if let Some(ex) = networks.iter_mut().find(|n| n.ssid == ssid) {
+            if in_use || signal > ex.signal { ex.signal = signal; ex.in_use = in_use; }
+            continue;
+        }
+        networks.push(Network { ssid, signal, secured, in_use });
+    }
+    networks.sort_by(|a, b| b.in_use.cmp(&a.in_use).then(b.signal.cmp(&a.signal)));
+    networks
+}
+
+// Split a nmcli -t output line on unescaped ':' into at most max_parts fields.
+fn split_nmcli(line: &str, max_parts: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur   = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&':') {
+            chars.next();
+            cur.push(':');
+        } else if c == ':' && parts.len() + 1 < max_parts {
+            parts.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    parts.push(cur);
+    parts
+}
+
+// ── Commands ──────────────────────────────────────────────────────────────────
+#[tauri::command]
+async fn scan() -> Result<Vec<Network>, String> {
+    nmcli(&["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
+            "device", "wifi", "list", "--rescan", "yes"])
+        .map(|out| parse_networks(&out))
+}
+
+#[tauri::command]
+async fn quick_scan() -> Result<Vec<Network>, String> {
+    nmcli(&["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
+            "device", "wifi", "list", "--rescan", "no"])
+        .map(|out| parse_networks(&out))
+}
+
+#[tauri::command]
+async fn get_wifi_enabled() -> bool {
+    nmcli(&["radio", "wifi"])
+        .map(|out| out.trim() == "enabled")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+async fn set_wifi_enabled(enabled: bool) -> Result<(), String> {
+    nmcli(&["radio", "wifi", if enabled { "on" } else { "off" }]).map(|_| ())
+}
+
+#[tauri::command]
+async fn connect(ssid: String, password: Option<String>) -> Result<(), String> {
+    let mut args = vec!["device", "wifi", "connect", ssid.as_str()];
+    if let Some(pw) = password.as_deref() {
+        args.extend(["password", pw]);
+    }
+    nmcli(&args).map(|_| ())
+}
+
+#[tauri::command]
+async fn disconnect(ssid: String) -> Result<(), String> {
+    nmcli(&["connection", "down", "id", &ssid]).map(|_| ())
+}
+
+#[tauri::command]
+async fn forget(ssid: String) -> Result<(), String> {
+    nmcli(&["connection", "delete", "id", &ssid]).map(|_| ())
+}
+
+#[tauri::command]
+async fn save_password(ssid: String, password: String) -> Result<(), String> {
+    nmcli(&["connection", "modify", "id", &ssid, "wifi-sec.psk", &password]).map(|_| ())
+}
+
+#[tauri::command]
+async fn fetch_info(ssid: String, in_use: bool) -> InfoState {
+    let mut s = InfoState {
+        ssid:        ssid.clone(),
+        has_profile: false,
+        password:    String::new(),
+        autoconnect: None,
+        bssid:       String::new(),
+        channel:     String::new(),
+        band:        String::new(),
+        security:    String::new(),
+        ip4_address: String::new(),
+        ip4_gateway: String::new(),
+        ip4_dns:     String::new(),
+    };
+
+    // 1. Saved profile: autoconnect + PSK
+    if let Ok(out) = nmcli(&["--show-secrets", "-t", "-f",
+                             "connection.autoconnect,802-11-wireless-security.psk",
+                             "connection", "show", "id", &ssid]) {
+        s.has_profile = true;
+        for line in out.lines() {
+            let p = split_nmcli(line, 2);
+            if p.len() < 2 { continue; }
+            match p[0].as_str() {
+                "connection.autoconnect" => {
+                    s.autoconnect = match p[1].as_str() {
+                        "no" => Some(false),
+                        _    => Some(true),   // "yes" or "-1" (default = yes)
+                    };
+                }
+                "802-11-wireless-security.psk" => {
+                    let v = p[1].trim().to_string();
+                    if !v.is_empty() && v != "--" { s.password = v; }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Scan cache: BSSID, channel, band, security
+    if let Ok(out) = nmcli(&["-t", "-f", "SSID,BSSID,CHAN,FREQ,SECURITY",
+                             "device", "wifi", "list"]) {
+        for line in out.lines() {
+            let p = split_nmcli(line, 5);
+            if p.len() < 5 || p[0].trim() != ssid { continue; }
+            let bssid = p[1].trim().to_string();
+            let chan  = p[2].trim().to_string();
+            let freq  = p[3].trim();
+            let sec   = p[4].trim();
+            if bssid != "--" && !bssid.is_empty() { s.bssid = bssid; }
+            if chan  != "--" && !chan.is_empty()  { s.channel = chan; }
+            let mhz: u32 = freq.split_whitespace().next()
+                .and_then(|x| x.parse().ok()).unwrap_or(0);
+            s.band = if mhz >= 5925 { "6 GHz".into() }
+                     else if mhz >= 4900 { "5 GHz".into() }
+                     else if mhz > 0    { "2.4 GHz".into() }
+                     else { String::new() };
+            if !sec.is_empty() && sec != "--" {
+                s.security = sec.split_whitespace().collect::<Vec<_>>().join("/");
+            }
+            break;
+        }
+    }
+
+    // 3. Active IP info (only when connected)
+    if in_use {
+        if let Ok(out) = nmcli(&["-t", "-f", "IP4.ADDRESS,IP4.GATEWAY,IP4.DNS",
+                                 "connection", "show", "--active", "id", &ssid]) {
+            for line in out.lines() {
+                let p = split_nmcli(line, 2);
+                if p.len() < 2 { continue; }
+                let field = p[0].as_str();
+                let val   = p[1].trim().to_string();
+                if val.is_empty() || val == "--" { continue; }
+                // Field names may carry an index suffix: IP4.ADDRESS[1]
+                if field.starts_with("IP4.ADDRESS") && s.ip4_address.is_empty() {
+                    s.ip4_address = val;
+                } else if field.starts_with("IP4.GATEWAY") {
+                    s.ip4_gateway = val;
+                } else if field.starts_with("IP4.DNS") && s.ip4_dns.is_empty() {
+                    s.ip4_dns = val;
+                }
+            }
+        }
+    }
+
+    s
+}
+
+// ── UI scale ──────────────────────────────────────────────────────────────────
+// WebKitGTK only honors integer GTK scale factors, unlike winit (used by the
+// old egui build), which derives a fractional scale from the monitor's
+// physical DPI on X11. Recompute that scale here so the app looks the same.
+#[cfg(target_os = "linux")]
+fn ui_scale() -> f64 {
+    use gdk::prelude::MonitorExt;
+    if let Some(s) = std::env::var("WIFI_GUI_SCALE").ok().and_then(|v| v.parse::<f64>().ok()) {
+        return s.clamp(0.5, 4.0);
+    }
+    if let Some(monitor) = gdk::Display::default().and_then(|d| d.monitor(0)) {
+        let px = (monitor.geometry().width() * monitor.scale_factor()) as f64;
+        let mm = monitor.width_mm() as f64;
+        if px > 0.0 && mm > 0.0 {
+            let scale = (px * 25.4 / mm) / 96.0;
+            if (0.75..=4.0).contains(&scale) {
+                return scale;
+            }
+        }
+    }
+    1.0
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(target_os = "linux")]
+            {
+                use tauri::Manager;
+                let win = app.get_webview_window("main").expect("main window");
+                let scale = ui_scale();
+                if (scale - 1.0).abs() > 0.02 {
+                    // set_size is ignored on non-resizable GTK windows
+                    let _ = win.set_resizable(true);
+                    let _ = win.set_size(tauri::LogicalSize::new(360.0 * scale, 500.0 * scale));
+                    let _ = win.set_resizable(false);
+                    let _ = win.set_zoom(scale);
+                }
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            scan,
+            quick_scan,
+            get_wifi_enabled,
+            set_wifi_enabled,
+            connect,
+            disconnect,
+            forget,
+            save_password,
+            fetch_info,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

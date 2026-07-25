@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wi-Fi</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Custom title bar -->
+  <div id="titlebar" data-tauri-drag-region>
+    <span class="title" data-tauri-drag-region>Wi-Fi</span>
+    <button id="close-btn" title="Close" aria-label="Close">
+      <svg viewBox="0 0 10 10" width="9" height="9">
+        <path d="M1 1 L9 9 M9 1 L1 9" stroke="white" stroke-width="1.6" />
+      </svg>
+    </button>
+  </div>
+
+  <!-- ── Network list view ─────────────────────────────────────────── -->
+  <div id="view-list" class="view">
+    <div class="panel header">
+      <span id="conn-status"></span>
+      <span class="spacer"></span>
+      <div id="scan-spinner" class="spinner hidden"></div>
+      <button id="scan-btn" class="btn neutral">Scan</button>
+      <label class="toggle">
+        <input type="checkbox" id="wifi-toggle" />
+        <span class="knob"></span>
+      </label>
+    </div>
+
+    <div id="network-list" class="content list"></div>
+
+    <div class="panel footer">
+      <span id="status-text" class="status"></span>
+      <span class="spacer"></span>
+      <button id="info-btn" class="btn info hidden">Info</button>
+      <button id="action-btn" class="btn connect" disabled>Connect</button>
+    </div>
+  </div>
+
+  <!-- ── Password entry view ───────────────────────────────────────── -->
+  <div id="view-password" class="view hidden">
+    <div class="content pad">
+      <h2 id="pw-title"></h2>
+      <p class="sub">Enter the network password:</p>
+      <input type="password" id="pw-input" placeholder="Password" autocomplete="off" />
+      <label class="check"><input type="checkbox" id="pw-show" /> Show password</label>
+      <p id="pw-status" class="status"></p>
+    </div>
+    <div class="panel footer">
+      <button id="pw-cancel" class="btn neutral">Cancel</button>
+      <span class="spacer"></span>
+      <button id="pw-connect" class="btn connect">Connect</button>
+    </div>
+  </div>
+
+  <!-- ── Info view ─────────────────────────────────────────────────── -->
+  <div id="view-info" class="view hidden">
+    <div class="content pad">
+      <h2 id="info-ssid"></h2>
+      <p id="info-conn" class="sub"></p>
+      <table id="info-grid"></table>
+      <p id="info-noprofile" class="sub hidden">No saved profile for this network.</p>
+    </div>
+    <div class="panel footer">
+      <button id="info-back" class="btn neutral">Back</button>
+      <span class="spacer"></span>
+      <button id="info-forget" class="btn forget hidden">Forget</button>
+      <button id="info-save" class="btn save hidden">Save Password</button>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
