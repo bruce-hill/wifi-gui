@@ -72,6 +72,15 @@ fn saved_wifi_names() -> std::collections::HashSet<String> {
     names
 }
 
+// nmcli's SIGNAL is NetworkManager's nl80211 mapping (percent = dBm + 120,
+// capped at −20 dBm), so an excellent −48 dBm link reads as only 72%. Recover
+// the dBm and apply the conventional quality curve, 2·(dBm + 100), which rates
+// −50 dBm and better as 100%.
+fn signal_percent(nm_signal: u8) -> u8 {
+    let dbm = nm_signal as i32 - 120;
+    (2 * (dbm + 100)).clamp(0, 100) as u8
+}
+
 fn parse_networks(output: &str, saved: &std::collections::HashSet<String>) -> Vec<Network> {
     let mut networks: Vec<Network> = Vec::new();
     for line in output.lines() {
@@ -79,7 +88,7 @@ fn parse_networks(output: &str, saved: &std::collections::HashSet<String>) -> Ve
         if parts.len() < 4 { continue; }
         let in_use  = parts[0].trim() == "*";
         let ssid    = parts[1].replace("\\:", ":").trim().to_string();
-        let signal: u8 = parts[2].trim().parse().unwrap_or(0);
+        let signal: u8 = parts[2].trim().parse().map(signal_percent).unwrap_or(0);
         let secured = { let s = parts[3].trim(); !s.is_empty() && s != "--" };
         if ssid.is_empty() || ssid == "--" { continue; }
         if let Some(ex) = networks.iter_mut().find(|n| n.ssid == ssid) {
