@@ -1,52 +1,102 @@
-const { invoke } = window.__TAURI__.core;
+// invoke() is typed against the Commands table in types.d.ts, so command
+// names, argument objects, and result types are all checked against main.rs.
+function invoke<C extends keyof Commands>(
+  cmd: C,
+  ...args: Commands[C]["args"] extends null ? [] : [Commands[C]["args"]]
+): Promise<Commands[C]["result"]> {
+  return window.__TAURI__.core.invoke(cmd, args[0] ?? undefined) as Promise<Commands[C]["result"]>;
+}
+
 const appWindow = window.__TAURI__.window.getCurrentWindow();
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let networks     = [];
-let selectedSsid = null;
-let wifiEnabled  = true;
-let scanning     = false;
-let busy         = false;  // a connect/disconnect is in flight
-let status       = "";
-let statusError  = false;
-let statusTimer  = null;
-let info         = null;   // InfoState when the info view is open
-let infoNet      = null;   // the Network the info view was opened for
-let connectingTo = null;   // SSID when the password view is open
-let hiddenJoin   = false;  // password view is in join-hidden-network mode
-let pwReturnNet  = null;   // reopen this network's info page when leaving the password view
-let forgetArmed  = false;
-let forgetTimer  = null;
-let wgStatus     = null;   // {installed, up, interface} — null until first check
-let wgBusy       = false;  // a wg-quick up/down is in flight
+let networks: Network[]              = [];
+let selectedSsid: string | null      = null;
+let wifiEnabled                      = true;
+let scanning                         = false;
+let busy                             = false;  // a connect/disconnect is in flight
+let statusMsg                        = "";
+let statusError                      = false;
+let statusTimer: number | undefined  = undefined;
+let info: InfoState | null           = null;   // set while the info view is open
+let infoNet: Network | null          = null;   // the Network the info view was opened for
+let connectingTo: string | null      = null;   // SSID when the password view is open
+let hiddenJoin                       = false;  // password view is in join-hidden-network mode
+let pwReturnNet: Network | null      = null;   // reopen this network's info page when leaving the password view
+let forgetArmed                      = false;
+let forgetTimer: number | undefined  = undefined;
+let wgStatus: WireguardStatus | null = null;   // null until first check
+let wgBusy                           = false;  // a WireGuard up/down is in flight
 
-const $ = (id) => document.getElementById(id);
+// Static element ids → their element types; $() catches typos and gives each
+// lookup the right type. "info-pw" is created dynamically by the info view.
+interface Elements {
+  "close-btn":     HTMLButtonElement;
+  "scan-btn":      HTMLButtonElement;
+  "wifi-toggle":   HTMLInputElement;
+  "conn-status":   HTMLSpanElement;
+  "status-text":   HTMLSpanElement;
+  "network-list":  HTMLDivElement;
+  "vpn-bar":       HTMLDivElement;
+  "vpn-row":       HTMLDivElement;
+  "vpn-sub":       HTMLDivElement;
+  "vpn-spinner":   HTMLDivElement;
+  "vpn-toggle":    HTMLInputElement;
+  "view-list":     HTMLDivElement;
+  "view-password": HTMLDivElement;
+  "view-info":     HTMLDivElement;
+  "pw-title":      HTMLHeadingElement;
+  "pw-sub":        HTMLParagraphElement;
+  "pw-ssid-row":   HTMLDivElement;
+  "pw-ssid":       HTMLInputElement;
+  "pw-input":      HTMLInputElement;
+  "pw-eye":        HTMLButtonElement;
+  "pw-status":     HTMLParagraphElement;
+  "pw-cancel":     HTMLButtonElement;
+  "pw-connect":    HTMLButtonElement;
+  "pw-spinner":    HTMLDivElement;
+  "info-ssid":     HTMLHeadingElement;
+  "info-conn":     HTMLParagraphElement;
+  "info-status":   HTMLParagraphElement;
+  "info-action":   HTMLButtonElement;
+  "info-body":     HTMLDivElement;
+  "info-noprofile": HTMLParagraphElement;
+  "info-forget":   HTMLButtonElement;
+  "info-save":     HTMLButtonElement;
+  "info-back":     HTMLButtonElement;
+  "info-pw":       HTMLInputElement;
+}
+
+const $ = <I extends keyof Elements>(id: I): Elements[I] =>
+  document.getElementById(id) as Elements[I];
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
-function currentView() {
-  for (const name of ["list", "password", "info"]) {
-    if (!$("view-" + name).classList.contains("hidden")) return name;
+type ViewName = "list" | "password" | "info";
+
+function currentView(): ViewName {
+  for (const name of ["list", "password", "info"] as const) {
+    if (!$(`view-${name}`).classList.contains("hidden")) return name;
   }
   return "list";
 }
 
-function showView(name) {
+function showView(name: ViewName): void {
   $("view-list").classList.toggle("hidden", name !== "list");
   $("view-password").classList.toggle("hidden", name !== "password");
   $("view-info").classList.toggle("hidden", name !== "info");
 }
 
-function setStatus(msg, { error = false, sticky = false } = {}) {
-  status = msg;
+function setStatus(msg: string, { error = false, sticky = false } = {}): void {
+  statusMsg = msg;
   statusError = error;
   clearTimeout(statusTimer);
   if (msg && !sticky) {
-    statusTimer = setTimeout(() => { status = ""; statusError = false; renderChrome(); }, 6000);
+    statusTimer = setTimeout(() => { statusMsg = ""; statusError = false; renderChrome(); }, 6000);
   }
   renderChrome();
 }
 
-function barsFor(signal) {
+function barsFor(signal: number): string {
   const active = signal >= 75 ? 4 : signal >= 50 ? 3 : signal >= 25 ? 2 : 1;
   let html = '<span class="bars">';
   for (let i = 0; i < 4; i++) html += `<i class="${i < active ? "on" : ""}"></i>`;
@@ -69,7 +119,7 @@ const CHEV_SVG = `<span class="icon chev"><svg width="7" height="12" viewBox="0 
   <path class="stroke" d="M1 1 L6 6 L1 11" fill="none" stroke-width="1.6"
         stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
 
-function renderList() {
+function renderList(): void {
   const list = $("network-list");
   if (!wifiEnabled) {
     list.innerHTML = `<div class="empty">${WIFI_EMPTY_SVG}<div>Wi-Fi is turned off</div></div>`;
@@ -93,7 +143,7 @@ function renderList() {
     row.title = `Signal: ${net.signal}%`;
     row.innerHTML = `${barsFor(net.signal)}
       <span class="labels"><div class="ssid"></div><div class="sub">${sub}</div></span>${icon}${CHEV_SVG}`;
-    row.querySelector(".ssid").textContent = net.ssid;
+    row.querySelector(".ssid")!.textContent = net.ssid;
     row.addEventListener("click", () => {
       if (busy) return;
       selectedSsid = net.ssid;
@@ -112,7 +162,7 @@ function renderList() {
   list.appendChild(otherCard);
 }
 
-function renderChrome() {
+function renderChrome(): void {
   // Header
   const conn = networks.find((n) => n.inUse);
   const cs = $("conn-status");
@@ -135,39 +185,40 @@ function renderChrome() {
 
   // Footer
   const st = $("status-text");
-  st.textContent = status || (scanning ? "Scanning for networks…" : "");
-  st.classList.toggle("error", statusError && !!status);
+  st.textContent = statusMsg || (scanning ? "Scanning for networks…" : "");
+  st.classList.toggle("error", statusError && !!statusMsg);
 }
 
-function renderVpn() {
+function renderVpn(): void {
   const bar = $("vpn-bar");
-  const show = !!(wgStatus && wgStatus.installed);
+  const wg = wgStatus;
+  const show = wg !== null && wg.installed;
   bar.classList.toggle("hidden", !show);
-  if (!show) return;
-  $("vpn-row").classList.toggle("in-use", wgStatus.up);
-  $("vpn-sub").textContent = wgBusy ? (($("vpn-toggle").checked) ? "Starting…" : "Stopping…")
-                           : wgStatus.up ? `Active: ${wgStatus.interface}`
+  if (!wg || !show) return;
+  $("vpn-row").classList.toggle("in-use", wg.up);
+  $("vpn-sub").textContent = wgBusy ? ($("vpn-toggle").checked ? "Starting…" : "Stopping…")
+                           : wg.up ? `Active: ${wg.interface}`
                            : "Inactive";
-  if (!wgBusy) $("vpn-toggle").checked = wgStatus.up;
+  if (!wgBusy) $("vpn-toggle").checked = wg.up;
   $("vpn-toggle").disabled = wgBusy;
   $("vpn-spinner").classList.toggle("hidden", !wgBusy);
 }
 
-function render() {
+function render(): void {
   renderList();
   renderChrome();
   renderVpn();
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
-async function refreshQuick() {
+async function refreshQuick(): Promise<void> {
   try {
     networks = await invoke("quick_scan");
   } catch (_) { /* keep the old list */ }
   render();
 }
 
-async function doScan() {
+async function doScan(): Promise<void> {
   scanning = true;
   setStatus("");
   render();
@@ -180,7 +231,7 @@ async function doScan() {
   render();
 }
 
-async function refreshWireguard() {
+async function refreshWireguard(): Promise<void> {
   try {
     wgStatus = await invoke("wireguard_status");
   } catch (_) { /* keep the old status */ }
@@ -188,7 +239,7 @@ async function refreshWireguard() {
 }
 
 // ── Password view ─────────────────────────────────────────────────────────────
-function openPasswordView(ssid, hidden) {
+function openPasswordView(ssid: string | null, hidden: boolean): void {
   connectingTo = ssid;
   hiddenJoin = hidden;
   pwReturnNet = hidden ? null : infoNet;
@@ -209,7 +260,7 @@ function openPasswordView(ssid, hidden) {
   (hidden ? $("pw-ssid") : $("pw-input")).focus();
 }
 
-function cancelPasswordView() {
+function cancelPasswordView(): void {
   if (busy) return;
   connectingTo = null;
   const ret = pwReturnNet;
@@ -218,7 +269,7 @@ function cancelPasswordView() {
   else showView("list");
 }
 
-function setPwBusy(b, msg = "") {
+function setPwBusy(b: boolean, msg = ""): void {
   busy = b;
   $("pw-spinner").classList.toggle("hidden", !b);
   $("pw-cancel").disabled = b;
@@ -230,7 +281,7 @@ function setPwBusy(b, msg = "") {
   updatePwButton();
 }
 
-function updatePwButton() {
+function updatePwButton(): void {
   const ssid = hiddenJoin ? $("pw-ssid").value.trim() : connectingTo;
   const pw = $("pw-input").value;
   // WPA passphrases are 8–63 chars; hidden networks may be open, so allow blank there.
@@ -238,9 +289,10 @@ function updatePwButton() {
   $("pw-connect").disabled = busy || !ssid || !pwOk;
 }
 
-async function submitPassword() {
+async function submitPassword(): Promise<void> {
   if (busy || $("pw-connect").disabled) return;
   const ssid = hiddenJoin ? $("pw-ssid").value.trim() : connectingTo;
+  if (!ssid) return;
   const pw = $("pw-input").value;
   setPwBusy(true, `Connecting to ${ssid}…`);
   try {
@@ -273,7 +325,7 @@ async function submitPassword() {
 }
 
 // ── Info view ─────────────────────────────────────────────────────────────────
-async function copyText(text) {
+async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
     return true;
@@ -301,21 +353,23 @@ const EYE_OFF_SVG = `<svg width="14" height="13" viewBox="0 0 14 13">
   <circle cx="7" cy="6.5" r="1.7" fill="currentColor"/>
   <path d="M3 11.5 L11 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`;
 
-function el(tag, cls, text) {
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K, cls?: string, text?: string,
+): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
 }
 
-function iconBtn(svg, title) {
+function iconBtn(svg: string, title: string): HTMLButtonElement {
   const b = el("button", "icon-btn");
   b.title = title;
   b.innerHTML = svg;
   return b;
 }
 
-function copyIconBtn(getValue, title = "Copy") {
+function copyIconBtn(getValue: () => string, title = "Copy"): HTMLButtonElement {
   const b = iconBtn(COPY_SVG, title);
   b.addEventListener("click", async () => {
     if (await copyText(getValue())) {
@@ -327,14 +381,15 @@ function copyIconBtn(getValue, title = "Copy") {
   return b;
 }
 
-function infoCard(parent, heading) {
+function infoCard(parent: HTMLElement, heading: string | null): HTMLDivElement {
   if (heading) parent.append(el("div", "info-sec", heading));
   const card = el("div", "info-card");
   parent.append(card);
   return card;
 }
 
-function addRow(card, label, valueNode, copyGetter) {
+function addRow(card: HTMLElement, label: string, valueNode: HTMLElement,
+                copyGetter?: () => string): HTMLDivElement {
   const row = el("div", "irow");
   row.append(el("span", "ilabel", label), valueNode);
   if (copyGetter) row.append(copyIconBtn(copyGetter));
@@ -342,14 +397,15 @@ function addRow(card, label, valueNode, copyGetter) {
   return row;
 }
 
-const val = (text) => el("span", "ival", text);
+const val = (text: string) => el("span", "ival", text);
 
-async function openInfoView(net) {
-  info = await invoke("fetch_info", { ssid: net.ssid, inUse: net.inUse });
-  info.secured = net.secured;
+async function openInfoView(net: Network): Promise<void> {
+  const fetched = await invoke("fetch_info", { ssid: net.ssid, inUse: net.inUse });
+  const inf: InfoState = { ...fetched, secured: net.secured };
+  info = inf;
   infoNet = net;
 
-  $("info-ssid").textContent = info.ssid;
+  $("info-ssid").textContent = inf.ssid;
   const ic = $("info-conn");
   ic.textContent = net.inUse ? "Currently connected" : "Not connected";
   ic.classList.toggle("connected", net.inUse);
@@ -365,12 +421,12 @@ async function openInfoView(net) {
   body.innerHTML = "";
 
   // ── Saved profile card (password first — it's the main event) ──
-  if (info.hasProfile) {
-    const ssid = info.ssid;
+  if (inf.hasProfile) {
+    const ssid = inf.ssid;
     const prof = infoCard(body, null);
 
-    if (info.secured) {
-      const savedPw = info.password;
+    if (inf.secured) {
+      const savedPw = inf.password;
       const input = document.createElement("input");
       input.type = "password";
       input.id = "info-pw";
@@ -402,51 +458,51 @@ async function openInfoView(net) {
     const toggle = el("label", "toggle small");
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.checked = info.autoconnect !== false;
+    cb.checked = inf.autoconnect !== false;
     toggle.append(cb, el("span", "knob"));
     acRow.append(toggle);
     prof.append(acRow);
-    cb.addEventListener("change", async (e) => {
+    cb.addEventListener("change", async () => {
       try {
-        await invoke("set_autoconnect", { ssid, enabled: e.target.checked });
+        await invoke("set_autoconnect", { ssid, enabled: cb.checked });
         $("info-status").textContent = "";
       } catch (err) {
-        e.target.checked = !e.target.checked;
+        cb.checked = !cb.checked;
         $("info-status").textContent = String(err);
       }
     });
   }
 
   // ── Details card ──
-  const details = infoCard(body, info.hasProfile ? "Details" : null);
+  const details = infoCard(body, inf.hasProfile ? "Details" : null);
   const sig = el("span", "ival sigval");
   sig.innerHTML = `${barsFor(net.signal)}<span>${net.signal}%</span>`;
   addRow(details, "Signal", sig);
-  if (info.security) addRow(details, "Security", val(info.security));
-  const freq = [info.band, info.channel && `Ch. ${info.channel}`]
+  if (inf.security) addRow(details, "Security", val(inf.security));
+  const freq = [inf.band, inf.channel && `Ch. ${inf.channel}`]
     .filter(Boolean).join(" · ");
   if (freq) addRow(details, "Frequency", val(freq));
-  if (info.rate) addRow(details, "Max rate", val(info.rate));
-  if (info.bssid) addRow(details, "BSSID", val(info.bssid), () => info.bssid);
+  if (inf.rate) addRow(details, "Max rate", val(inf.rate));
+  if (inf.bssid) addRow(details, "BSSID", val(inf.bssid), () => inf.bssid);
 
   // ── Network card (populated only while connected) ──
-  if (info.ip4Address || info.ip4Gateway || info.ip4Dns) {
+  if (inf.ip4Address || inf.ip4Gateway || inf.ip4Dns) {
     const netc = infoCard(body, "Network");
-    if (info.ip4Address) addRow(netc, "IP Address", val(info.ip4Address), () => info.ip4Address);
-    if (info.ip4Gateway) addRow(netc, "Gateway", val(info.ip4Gateway), () => info.ip4Gateway);
-    if (info.ip4Dns) addRow(netc, "DNS", val(info.ip4Dns), () => info.ip4Dns);
+    if (inf.ip4Address) addRow(netc, "IP Address", val(inf.ip4Address), () => inf.ip4Address);
+    if (inf.ip4Gateway) addRow(netc, "Gateway", val(inf.ip4Gateway), () => inf.ip4Gateway);
+    if (inf.ip4Dns) addRow(netc, "DNS", val(inf.ip4Dns), () => inf.ip4Dns);
   }
 
   forgetArmed = false;
   clearTimeout(forgetTimer);
   $("info-forget").textContent = "Forget";
-  $("info-noprofile").classList.toggle("hidden", info.hasProfile);
-  $("info-forget").classList.toggle("hidden", !info.hasProfile);
+  $("info-noprofile").classList.toggle("hidden", inf.hasProfile);
+  $("info-forget").classList.toggle("hidden", !inf.hasProfile);
   $("info-save").classList.add("hidden");  // appears once the password is edited
   showView("info");
 }
 
-function closeInfoView() {
+function closeInfoView(): void {
   info = null;
   infoNet = null;
   clearTimeout(forgetTimer);
@@ -454,9 +510,9 @@ function closeInfoView() {
   showView("list");
 }
 
-function setInfoBusy(b, msg = "") {
+function setInfoBusy(b: boolean, msg = ""): void {
   busy = b;
-  for (const id of ["info-action", "info-back", "info-forget", "info-save"]) {
+  for (const id of ["info-action", "info-back", "info-forget", "info-save"] as const) {
     $(id).disabled = b;
   }
   const s = $("info-status");
@@ -465,7 +521,7 @@ function setInfoBusy(b, msg = "") {
 }
 
 // Run connect/disconnect from the info view, then re-render it with fresh state.
-async function infoRun(ssid, progress, fn) {
+async function infoRun(ssid: string, progress: string, fn: () => Promise<unknown>): Promise<void> {
   setInfoBusy(true, progress);
   let err = "";
   try { await fn(); } catch (e) { err = String(e); }
@@ -490,8 +546,8 @@ $("close-btn").addEventListener("click", () => appWindow.close());
 
 $("scan-btn").addEventListener("click", doScan);
 
-$("wifi-toggle").addEventListener("change", async (e) => {
-  wifiEnabled = e.target.checked;
+$("wifi-toggle").addEventListener("change", async () => {
+  wifiEnabled = $("wifi-toggle").checked;
   if (wifiEnabled) {
     setStatus("Turning Wi-Fi on…", { sticky: true });
     render();
@@ -512,9 +568,9 @@ $("wifi-toggle").addEventListener("change", async (e) => {
   }
 });
 
-$("vpn-toggle").addEventListener("change", async (e) => {
+$("vpn-toggle").addEventListener("change", async () => {
   if (!wgStatus || wgBusy) return;
-  const up = e.target.checked;
+  const up = $("vpn-toggle").checked;
   const iface = wgStatus.interface;
   wgBusy = true;
   renderVpn();
@@ -559,10 +615,12 @@ $("info-back").addEventListener("click", closeInfoView);
 $("info-action").addEventListener("click", () => {
   if (busy || !info) return;
   const ssid = info.ssid;
+  const hasProfile = info.hasProfile;
   const net = networks.find((n) => n.ssid === ssid) || infoNet;
+  if (!net) return;
   if (net.inUse) {
     infoRun(ssid, `Disconnecting…`, () => invoke("disconnect", { ssid }));
-  } else if (info.hasProfile) {
+  } else if (hasProfile) {
     infoRun(ssid, `Connecting…`, () => invoke("connect_saved", { ssid }));
   } else if (net.secured) {
     openPasswordView(ssid, false);
@@ -572,6 +630,7 @@ $("info-action").addEventListener("click", () => {
 });
 
 $("info-forget").addEventListener("click", async () => {
+  if (!info) return;
   // Two-step confirm: first click arms, second click within 3s executes.
   if (!forgetArmed) {
     forgetArmed = true;
@@ -597,6 +656,7 @@ $("info-forget").addEventListener("click", async () => {
 });
 
 $("info-save").addEventListener("click", async () => {
+  if (!info) return;
   const ssid = info.ssid;
   const password = $("info-pw").value;
   closeInfoView();
