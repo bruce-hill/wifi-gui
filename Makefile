@@ -1,4 +1,4 @@
-PREFIX ?= $(HOME)/.local
+PREFIX ?= /usr/local
 TARGET_DIR := $(shell cd src-tauri && cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 TSC := node_modules/.bin/tsc
 
