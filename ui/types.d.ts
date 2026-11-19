@@ -47,6 +47,7 @@ interface Commands {
   connect: { args: { ssid: string; password: string | null }; result: null };
   connect_saved: { args: { ssid: string }; result: null };
   connect_hidden: { args: { ssid: string; password: string | null }; result: null };
+  cancel_connect: { args: null; result: null };
   set_autoconnect: { args: { ssid: string; enabled: boolean }; result: null };
   disconnect: { args: { ssid: string }; result: null };
   forget: { args: { ssid: string }; result: null };

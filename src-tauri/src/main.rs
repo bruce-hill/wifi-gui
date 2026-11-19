@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 #[derive(Clone, Debug, Serialize)]
@@ -150,19 +151,50 @@ async fn set_wifi_enabled(enabled: bool) -> Result<(), String> {
     nmcli(&["radio", "wifi", if enabled { "on" } else { "off" }]).map(|_| ())
 }
 
+// ── Connecting ────────────────────────────────────────────────────────────────
+// Set by cancel_connect so the in-flight connect reports "Cancelled" instead of
+// nmcli's activation-failed message. The UI only runs one connect at a time.
+static CONNECT_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+// Run an nmcli command that activates a connection (and blocks until it's up).
+fn nmcli_connect(args: &[&str]) -> Result<(), String> {
+    CONNECT_CANCELLED.store(false, Ordering::SeqCst);
+    let res = nmcli(args).map(|_| ());
+    if res.is_err() && CONNECT_CANCELLED.load(Ordering::SeqCst) {
+        return Err("Cancelled".into());
+    }
+    res
+}
+
+// Abort an in-progress activation by disconnecting the Wi-Fi device, which
+// works regardless of what the new profile ended up being named. The blocked
+// nmcli in nmcli_connect then fails and returns.
+#[tauri::command]
+async fn cancel_connect() -> Result<(), String> {
+    CONNECT_CANCELLED.store(true, Ordering::SeqCst);
+    let out = nmcli(&["-t", "-f", "DEVICE,TYPE", "device"])?;
+    for line in out.lines() {
+        let p = split_nmcli(line, 2);
+        if p.len() == 2 && p[1] == "wifi" {
+            let _ = nmcli(&["device", "disconnect", &p[0]]);
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn connect(ssid: String, password: Option<String>) -> Result<(), String> {
     let mut args = vec!["device", "wifi", "connect", ssid.as_str()];
     if let Some(pw) = password.as_deref() {
         args.extend(["password", pw]);
     }
-    nmcli(&args).map(|_| ())
+    nmcli_connect(&args)
 }
 
 // Bring up an existing saved profile (no password prompt needed).
 #[tauri::command]
 async fn connect_saved(ssid: String) -> Result<(), String> {
-    nmcli(&["connection", "up", "id", &ssid]).map(|_| ())
+    nmcli_connect(&["connection", "up", "id", &ssid])
 }
 
 #[tauri::command]
@@ -172,7 +204,7 @@ async fn connect_hidden(ssid: String, password: Option<String>) -> Result<(), St
         args.extend(["password", pw]);
     }
     args.extend(["hidden", "yes"]);
-    nmcli(&args).map(|_| ())
+    nmcli_connect(&args)
 }
 
 #[tauri::command]
@@ -427,6 +459,7 @@ fn main() {
             connect,
             connect_saved,
             connect_hidden,
+            cancel_connect,
             set_autoconnect,
             disconnect,
             forget,

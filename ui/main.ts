@@ -27,6 +27,10 @@ let forgetArmed                      = false;
 let forgetTimer: number | undefined  = undefined;
 let wgStatus: WireguardStatus | null = null;   // null until first check
 let wgBusy                           = false;  // a WireGuard up/down is in flight
+let infoCancellable                  = false;  // the info view's in-flight action is a cancellable connect
+
+// The error string the backend's connect commands return after cancel_connect.
+const CANCELLED = "Cancelled";
 
 // Static element ids → their element types; $() catches typos and gives each
 // lookup the right type. "info-pw" is created dynamically by the info view.
@@ -261,7 +265,10 @@ function openPasswordView(ssid: string | null, hidden: boolean): void {
 }
 
 function cancelPasswordView(): void {
-  if (busy) return;
+  if (busy) {
+    invoke("cancel_connect").catch(() => {});
+    return;
+  }
   connectingTo = null;
   const ret = pwReturnNet;
   pwReturnNet = null;
@@ -272,7 +279,6 @@ function cancelPasswordView(): void {
 function setPwBusy(b: boolean, msg = ""): void {
   busy = b;
   $("pw-spinner").classList.toggle("hidden", !b);
-  $("pw-cancel").disabled = b;
   $("pw-ssid").disabled = b;
   $("pw-input").disabled = b;
   $("pw-eye").disabled = b;
@@ -317,8 +323,9 @@ async function submitPassword(): Promise<void> {
     // only reachable for networks with no pre-existing profile.)
     if (!hiddenJoin) invoke("forget", { ssid }).catch(() => {});
     setPwBusy(false);
-    $("pw-status").textContent = String(e);
-    $("pw-status").classList.add("error");
+    const cancelled = String(e) === CANCELLED;
+    $("pw-status").textContent = cancelled ? "Connection cancelled" : String(e);
+    $("pw-status").classList.toggle("error", !cancelled);
     $("pw-input").focus();
     $("pw-input").select();
   }
@@ -409,13 +416,11 @@ async function openInfoView(net: Network): Promise<void> {
   const ic = $("info-conn");
   ic.textContent = net.inUse ? "Currently connected" : "Not connected";
   ic.classList.toggle("connected", net.inUse);
-  $("info-status").textContent = "";
-  $("info-status").classList.remove("error");
+  setInfoBusy(false);
 
   const act = $("info-action");
   act.textContent = net.inUse ? "Disconnect" : "Connect";
   act.className = net.inUse ? "btn disconnect" : "btn connect";
-  act.disabled = false;
 
   const body = $("info-body");
   body.innerHTML = "";
@@ -510,10 +515,18 @@ function closeInfoView(): void {
   showView("list");
 }
 
-function setInfoBusy(b: boolean, msg = ""): void {
+// While connecting, the action button stays enabled and becomes "Cancel".
+function setInfoBusy(b: boolean, msg = "", cancellable = false): void {
   busy = b;
+  infoCancellable = b && cancellable;
   for (const id of ["info-action", "info-back", "info-forget", "info-save"] as const) {
     $(id).disabled = b;
+  }
+  if (infoCancellable) {
+    const act = $("info-action");
+    act.textContent = "Cancel";
+    act.className = "btn neutral";
+    act.disabled = false;
   }
   const s = $("info-status");
   s.classList.remove("error");
@@ -521,8 +534,9 @@ function setInfoBusy(b: boolean, msg = ""): void {
 }
 
 // Run connect/disconnect from the info view, then re-render it with fresh state.
-async function infoRun(ssid: string, progress: string, fn: () => Promise<unknown>): Promise<void> {
-  setInfoBusy(true, progress);
+async function infoRun(ssid: string, progress: string, fn: () => Promise<unknown>,
+                       cancellable = false): Promise<void> {
+  setInfoBusy(true, progress, cancellable);
   let err = "";
   try { await fn(); } catch (e) { err = String(e); }
   busy = false;
@@ -531,13 +545,15 @@ async function infoRun(ssid: string, progress: string, fn: () => Promise<unknown
   const net = networks.find((n) => n.ssid === ssid);
   if (net) {
     await openInfoView(net);
-    if (err) {
+    if (err === CANCELLED) {
+      $("info-status").textContent = "Connection cancelled";
+    } else if (err) {
       $("info-status").textContent = err;
       $("info-status").classList.add("error");
     }
   } else {
     closeInfoView();
-    if (err) setStatus(err, { error: true, sticky: true });
+    if (err && err !== CANCELLED) setStatus(err, { error: true, sticky: true });
   }
 }
 
@@ -613,6 +629,10 @@ $("pw-eye").addEventListener("click", () => {
 $("info-back").addEventListener("click", closeInfoView);
 
 $("info-action").addEventListener("click", () => {
+  if (infoCancellable) {
+    invoke("cancel_connect").catch(() => {});
+    return;
+  }
   if (busy || !info) return;
   const ssid = info.ssid;
   const hasProfile = info.hasProfile;
@@ -621,11 +641,13 @@ $("info-action").addEventListener("click", () => {
   if (net.inUse) {
     infoRun(ssid, `Disconnecting…`, () => invoke("disconnect", { ssid }));
   } else if (hasProfile) {
-    infoRun(ssid, `Connecting…`, () => invoke("connect_saved", { ssid }));
+    infoRun(ssid, `Connecting…`, () => invoke("connect_saved", { ssid }), true);
   } else if (net.secured) {
     openPasswordView(ssid, false);
   } else {
-    infoRun(ssid, `Connecting…`, () => invoke("connect", { ssid, password: null }));
+    // As in submitPassword, don't leave a profile behind if this first attempt fails.
+    infoRun(ssid, `Connecting…`, () => invoke("connect", { ssid, password: null })
+      .catch((e) => { invoke("forget", { ssid }).catch(() => {}); throw e; }), true);
   }
 });
 
@@ -693,7 +715,8 @@ document.addEventListener("keydown", (e) => {
   } else if (view === "password") {
     if (e.key === "Escape") cancelPasswordView();
   } else if (view === "info") {
-    if (e.key === "Escape" || e.key === "ArrowLeft") closeInfoView();
+    if (e.key === "Escape" && infoCancellable) invoke("cancel_connect").catch(() => {});
+    else if ((e.key === "Escape" || e.key === "ArrowLeft") && !busy) closeInfoView();
   }
 });
 
